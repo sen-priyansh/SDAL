@@ -1,0 +1,10 @@
+[package]
+name = "sdal-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sdal-core = { path = "../core" }
+sdal-storage = { path = "../storage" }
+sdal-chunking = { path = "../chunking" }
+sdal-policy = { path = "../policy" }
