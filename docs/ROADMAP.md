@@ -19,6 +19,17 @@ This document outlines the strategic plan to evolve SDAL from a concept into a p
     - `sdal add <file>`: Chunk and store a file.
     - `sdal cat <hash>`: Retrieve and reconstruct a file.
 
+
+## Phase 1.5: Internal Guarantees
+**Goal:** Not user-visible, but critical. Ensure the system fails loudly and safely.
+
+- [ ] **Invariants Enforcement**
+    - Assert immutability assumptions.
+    - Validate DAG correctness.
+- [ ] **Fail-Stop**
+    - Refuse corrupted states early.
+    - Panic loudly on invariant violations.
+
 ## Phase 2: Version Control Primitives
 **Goal:** A usable VCS that can track history and switch between states.
 
