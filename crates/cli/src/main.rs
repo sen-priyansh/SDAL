@@ -291,20 +291,22 @@ fn main() -> Result<()> {
                 println!();
             }
             
-            // Find untracked files (not in index AND not in HEAD)
+            // Find untracked and modified files
             let mut all_files = Vec::new();
             collect_files(&current_dir, &current_dir, &ignore, &mut all_files)?;
             
             // Get files from HEAD commit if it exists
-            let mut head_files = std::collections::HashSet::new();
+            let mut head_files = std::collections::HashMap::new();
             if let Some(head_hash) = refs.read_head()? {
                 let storage = FilesystemStorage::new(&sdal_root)?;
                 if let Ok(commit_data) = storage.get(&head_hash) {
                     if let Ok(Object::Commit(commit)) = serde_json::from_slice::<Object>(&commit_data) {
                         if let Ok(tree_data) = storage.get(&commit.tree) {
                             if let Ok(Object::Tree(tree)) = serde_json::from_slice::<Object>(&tree_data) {
-                                for (name, _) in tree.entries {
-                                    head_files.insert(name);
+                                for (name, entry) in tree.entries {
+                                    if let TreeEntry::Blob { hash, .. } = entry {
+                                        head_files.insert(name, hash);
+                                    }
                                 }
                             }
                         }
@@ -313,11 +315,66 @@ fn main() -> Result<()> {
             }
             
             let mut untracked = Vec::new();
-            for (_, rel_path) in all_files {
-                // File is untracked if it's not in index AND not in HEAD
-                if !index.is_staged(&rel_path) && !head_files.contains(&rel_path) {
-                    untracked.push(rel_path);
+            let mut modified = Vec::new();
+            
+            for (path, rel_path) in &all_files {
+                if index.is_staged(&rel_path) {
+                    // Already staged, skip
+                    continue;
                 }
+                
+                if let Some(head_hash) = head_files.get(rel_path) {
+                    // File exists in HEAD - check if modified
+                    let data = fs::read(path)?;
+                    let chunker = FixedSizeChunker::new(1024 * 1024);
+                    let chunks = chunker.chunk(&data)?;
+                    
+                    let mut chunk_entries = Vec::new();
+                    for chunk in chunks {
+                        chunk_entries.push(ChunkEntry::from(&chunk));
+                    }
+                    
+                    let blob = Blob {
+                        chunks: chunk_entries,
+                        total_size: data.len() as u64,
+                    };
+                    let object = Object::Blob(blob);
+                    let blob_json = serde_json::to_vec(&object)?;
+                    
+                    let mut hasher = Sha256::new();
+                    hasher.update(&blob_json);
+                    let current_hash = hex::encode(hasher.finalize());
+                    
+                    if &current_hash != head_hash {
+                        modified.push(rel_path.clone());
+                    }
+                } else {
+                    // File not in HEAD - it's untracked
+                    untracked.push(rel_path.clone());
+                }
+            }
+            
+            // Check for deleted files (in HEAD but not in working dir)
+            let working_files: std::collections::HashSet<_> = 
+                all_files.iter().map(|(_, rel_path)| rel_path.as_str()).collect();
+            
+            let mut deleted = Vec::new();
+            for (path, _) in &head_files {
+                if !working_files.contains(path.as_str()) && !index.is_staged(path) {
+                    deleted.push(path.clone());
+                }
+            }
+            
+            if !modified.is_empty() || !deleted.is_empty() {
+                println!("Changes not staged for commit:");
+                println!("  (use \"sdal add <file>...\" to update what will be committed)\n");
+                for path in &modified {
+                    println!("\t\x1b[33mmodified:   {}\x1b[0m", path);
+                }
+                for path in &deleted {
+                    println!("\t\x1b[31mdeleted:    {}\x1b[0m", path);
+                }
+                println!();
             }
             
             if !untracked.is_empty() {
@@ -329,7 +386,7 @@ fn main() -> Result<()> {
                 println!();
             }
             
-            if index.entries.is_empty() && untracked.is_empty() {
+            if index.entries.is_empty() && untracked.is_empty() && modified.is_empty() && deleted.is_empty() {
                 println!("nothing to commit, working tree clean");
             }
         }
