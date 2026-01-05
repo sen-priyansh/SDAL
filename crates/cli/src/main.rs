@@ -8,9 +8,21 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
+const BANNER: &str = r#"
+  ███████╗██████╗  █████╗ ██╗     
+  ██╔════╝██╔══██╗██╔══██╗██║     
+  ███████╗██║  ██║███████║██║     
+  ╚════██║██║  ██║██╔══██║██║     
+  ███████║██████╔╝██║  ██║███████╗
+  ╚══════╝╚═════╝ ╚═╝  ╚═╝╚══════╝
+
+  Sovereign Decentralized Asset Ledger
+"#;
+
 #[derive(Parser)]
 #[command(name = "sdal")]
-#[command(about = "Sovereign Decentralized Asset Ledger", long_about = None)]
+#[command(version)]
+#[command(about = BANNER, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -18,62 +30,119 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    // Repository Management
     /// Initialize a new SDAL repository
+    /// 
+    /// Creates a new .sdal directory with the necessary structure for version control.
     Init,
-    /// Add files to staging area
+    
+    // Staging and Committing
+    /// Add files to the staging area
+    /// 
+    /// Stage changes to be included in the next commit. Use '.' to add all files.
+    /// Respects patterns in .sdalignore file.
     Add {
-        /// Files to add (use '.' for all)
+        /// Files to add (use '.' for all files in current directory)
         files: Vec<PathBuf>,
     },
-    /// Cat a blob object
-    Cat {
-        hash: String,
-    },
-    /// Create a new commit
+    
+    /// Create a new commit from staged changes
+    /// 
+    /// Records a snapshot of all staged changes. If checkpoints exist, uses the
+    /// current checkpoint tree and automatically deletes all checkpoints.
     Commit {
         #[arg(short, long)]
+        /// Commit message describing the changes
         message: String,
     },
-    /// Show commit history
+    
+    // History and Status
+    /// Show the commit history
+    /// 
+    /// Displays commits in reverse chronological order with hash, author, date, and message.
     Log,
-    /// Show working directory status
+    
+    /// Show the working directory status
+    /// 
+    /// Displays:
+    /// - Staged files (green)
+    /// - Modified files (yellow)
+    /// - Deleted files (red)
+    /// - Untracked files (red)
     Status,
-    /// Reset current HEAD to specified state
+    
+    // Navigation and Recovery
+    /// Reset current HEAD to a specified commit
+    /// 
+    /// Modes:
+    ///   --mode soft:  Move HEAD only (keep staged and working changes)
+    ///   --mode mixed: Move HEAD and unstage (default, keep working changes)
+    ///   --mode hard:  Move HEAD, unstage, and discard all changes
     Reset {
-        /// Commit hash or reference (e.g., HEAD~1)
+        /// Commit hash or reference (e.g., HEAD, HEAD~1, HEAD~2)
         #[arg(default_value = "HEAD")]
         commit: String,
         /// Reset mode: soft, mixed, or hard
         #[arg(long, default_value = "mixed")]
         mode: String,
     },
-    /// Restore working tree files
+    
+    /// Restore files from HEAD
+    /// 
+    /// Discards uncommitted changes and restores files to their state in HEAD.
     Restore {
-        /// Files to restore
+        /// Files to restore from HEAD
         files: Vec<PathBuf>,
     },
-    /// Manage checkpoints
+    
+    // Checkpoints
+    /// Manage temporary local snapshots (checkpoints)
+    /// 
+    /// Checkpoints are temporary snapshots for safe experimentation.
+    /// They are automatically deleted when you create a commit.
     #[command(subcommand)]
     Checkpoint(CheckpointCommands),
+    
+    // Debug
+    /// Display a blob object (debug)
+    /// 
+    /// Low-level command to inspect blob contents by hash.
+    Cat {
+        /// Blob hash to display
+        hash: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum CheckpointCommands {
-    /// Save current state as a checkpoint
+    /// Save current working state as a checkpoint
+    /// 
+    /// Creates a temporary snapshot of your current work without creating a commit.
     Save {
-        /// Optional message
+        /// Optional description for this checkpoint
         message: Option<String>,
     },
-    /// List all checkpoints
+    
+    /// List all saved checkpoints
+    /// 
+    /// Shows all checkpoints with their IDs, messages, and timestamps.
+    /// Current checkpoint is marked with *.
     List,
-    /// Checkout to a specific checkpoint
+    
+    /// Restore working directory to a checkpoint
+    /// 
+    /// Replaces your working directory with the saved checkpoint state.
+    /// Does not affect HEAD or commit history.
     Checkout {
-        /// Checkpoint ID
+        /// Checkpoint ID (e.g., cp_0001)
         id: String,
     },
+    
     /// Delete a checkpoint
+    /// 
+    /// Removes a checkpoint. This does not affect commits or CAS chunks.
     Drop {
-        /// Checkpoint ID
+        /// Checkpoint ID to delete
         id: String,
     },
 }
