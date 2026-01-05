@@ -6,6 +6,7 @@ pub mod refs;
 pub mod workdir;
 pub mod index;
 pub mod ignore;
+pub mod checkout;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Blob {

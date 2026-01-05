@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use anyhow::{Result, Context};
 use sdal_chunking::{FixedSizeChunker, Chunker};
 use sdal_storage::{FilesystemStorage, Storage};
-use sdal_core::{Blob, Object, ChunkEntry, Commit, Tree, TreeEntry, refs::Refs, workdir, index::Index, ignore::Ignore};
+use sdal_core::{Blob, Object, ChunkEntry, Commit, Tree, TreeEntry, refs::Refs, workdir, index::Index, ignore::Ignore, checkout};
 use std::fs;
 use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
@@ -38,6 +38,44 @@ enum Commands {
     Log,
     /// Show working directory status
     Status,
+    /// Reset current HEAD to specified state
+    Reset {
+        /// Commit hash or reference (e.g., HEAD~1)
+        #[arg(default_value = "HEAD")]
+        commit: String,
+        /// Reset mode: soft, mixed, or hard
+        #[arg(long, default_value = "mixed")]
+        mode: String,
+    },
+    /// Restore working tree files
+    Restore {
+        /// Files to restore
+        files: Vec<PathBuf>,
+    },
+    /// Manage checkpoints
+    #[command(subcommand)]
+    Checkpoint(CheckpointCommands),
+}
+
+#[derive(Subcommand)]
+enum CheckpointCommands {
+    /// Save current state as a checkpoint
+    Save {
+        /// Optional message
+        message: Option<String>,
+    },
+    /// List all checkpoints
+    List,
+    /// Checkout to a specific checkpoint
+    Checkout {
+        /// Checkpoint ID
+        id: String,
+    },
+    /// Delete a checkpoint
+    Drop {
+        /// Checkpoint ID
+        id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -166,32 +204,39 @@ fn main() -> Result<()> {
             let refs = Refs::new(&sdal_root);
             let mut index = Index::load(&sdal_root)?;
             
-            if index.entries.is_empty() {
-                println!("Nothing to commit (use \"sdal add\" to stage files)");
-                return Ok(());
-            }
-            
-            // Build tree from index
-            let mut tree = Tree::new();
-            for (path, blob_hash) in &index.entries {
-                tree.add_entry(
-                    path.clone(),
-                    TreeEntry::Blob {
-                        hash: blob_hash.clone(),
-                        size: 0, // TODO: Track size in index
-                    },
-                );
-            }
-            
-            tree.validate().map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
-            let tree_object = Object::Tree(tree);
-            let tree_json = serde_json::to_vec(&tree_object)?;
-            
-            let mut hasher = Sha256::new();
-            hasher.update(&tree_json);
-            let tree_hash = hex::encode(hasher.finalize());
-            
-            storage.put(&tree_hash, &tree_json)?;
+            // Check if we should use checkpoint tree
+            let tree_hash = if let Some(checkpoint_tree) = sdal_checkpoint::ops::get_current_tree(&sdal_root)? {
+                // Use tree from current checkpoint
+                checkpoint_tree
+            } else {
+                // Build tree from index
+                if index.entries.is_empty() {
+                    println!("Nothing to commit (use \"sdal add\" to stage files)");
+                    return Ok(());
+                }
+                
+                let mut tree = Tree::new();
+                for (path, blob_hash) in &index.entries {
+                    tree.add_entry(
+                        path.clone(),
+                        TreeEntry::Blob {
+                            hash: blob_hash.clone(),
+                            size: 0, // TODO: Track size in index
+                        },
+                    );
+                }
+                
+                tree.validate().map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
+                let tree_object = Object::Tree(tree);
+                let tree_json = serde_json::to_vec(&tree_object)?;
+                
+                let mut hasher = Sha256::new();
+                hasher.update(&tree_json);
+                let tree_hash = hex::encode(hasher.finalize());
+                
+                storage.put(&tree_hash, &tree_json)?;
+                tree_hash
+            };
             
             // Get parent commit (if any)
             let parent = refs.read_head()?;
@@ -227,6 +272,9 @@ fn main() -> Result<()> {
             // Clear index after successful commit
             index.clear();
             index.save(&sdal_root)?;
+            
+            // Delete all checkpoints (they are now part of commit history)
+            sdal_checkpoint::ops::clear_all_checkpoints(&sdal_root)?;
             
             println!("Created commit {} \"{}\"", &commit_hash[..7], message);
         }
@@ -388,6 +436,155 @@ fn main() -> Result<()> {
             
             if index.entries.is_empty() && untracked.is_empty() && modified.is_empty() && deleted.is_empty() {
                 println!("nothing to commit, working tree clean");
+            }
+        }
+        Commands::Reset { commit, mode } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+            let mut index = Index::load(&sdal_root)?;
+            
+            // Resolve commit reference
+            let target_hash = if commit == "HEAD" {
+                refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?
+            } else if commit.starts_with("HEAD~") {
+                // Simple HEAD~N support
+                let steps = commit.strip_prefix("HEAD~")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or(anyhow::anyhow!("Invalid reference: {}", commit))?;
+                
+                let mut current = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+                for _ in 0..steps {
+                    let commit_data = storage.get(&current)?;
+                    let obj: Object = serde_json::from_slice(&commit_data)?;
+                    if let Object::Commit(c) = obj {
+                        current = c.parent.ok_or(anyhow::anyhow!("No more commits"))?;
+                    }
+                }
+                current
+            } else {
+                commit.clone()
+            };
+            
+            match mode.as_str() {
+                "soft" => {
+                    // Move HEAD only
+                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
+                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
+                        refs.update_ref(ref_name, &target_hash)?;
+                    }
+                    println!("HEAD moved to {}", &target_hash[..7]);
+                }
+                "mixed" => {
+                    // Move HEAD and reset index
+                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
+                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
+                        refs.update_ref(ref_name, &target_hash)?;
+                    }
+                    index.clear();
+                    index.save(&sdal_root)?;
+                    println!("Unstaged changes after reset:");
+                    println!("HEAD moved to {}", &target_hash[..7]);
+                }
+                "hard" => {
+                    // Move HEAD, reset index, and restore working dir
+                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
+                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
+                        refs.update_ref(ref_name, &target_hash)?;
+                    }
+                    index.clear();
+                    index.save(&sdal_root)?;
+                    
+                    // Restore working directory from commit
+                    let commit_data = storage.get(&target_hash)?;
+                    let obj: Object = serde_json::from_slice(&commit_data)?;
+                    if let Object::Commit(commit) = obj {
+                        checkout::restore_tree(&commit.tree, &storage, &current_dir)?;
+                    }
+                    
+                    println!("HEAD is now at {} (working directory restored)", &target_hash[..7]);
+                }
+                _ => anyhow::bail!("Invalid mode: {}. Use soft, mixed, or hard", mode),
+            }
+        }
+        Commands::Restore { files } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+            
+            let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+            let commit_data = storage.get(&head_hash)?;
+            let obj: Object = serde_json::from_slice(&commit_data)?;
+            
+            if let Object::Commit(commit) = obj {
+               let tree_data = storage.get(&commit.tree)?;
+                let tree_obj: Object = serde_json::from_slice(&tree_data)?;
+                
+                if let Object::Tree(tree) = tree_obj {
+                    for file_path in files {
+                        let rel_path = file_path.strip_prefix(&current_dir)
+                            .unwrap_or(&file_path)
+                            .to_string_lossy()
+                            .to_string();
+                        
+                        // Find blob in tree
+                        for (name, entry) in &tree.entries {
+                            if name == &rel_path {
+                                if let TreeEntry::Blob { hash, .. } = entry {
+                                    checkout::restore_blob(hash, &storage, &file_path)?;
+                                    println!("Restored '{}'", rel_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Checkpoint(cmd) => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            match cmd {
+                CheckpointCommands::Save { message } => {
+                    let id = sdal_checkpoint::ops::save_checkpoint(&sdal_root, &current_dir, message.clone())?;
+                    println!("Saved checkpoint: {}", id);
+                    if let Some(msg) = message {
+                        println!("  Message: {}", msg);
+                    }
+                }
+                CheckpointCommands::List => {
+                    let index = sdal_checkpoint::ops::list_checkpoints(&sdal_root)?;
+                    
+                    if index.checkpoints.is_empty() {
+                        println!("No checkpoints");
+                    } else {
+                        println!("Checkpoints:");
+                        for cp in &index.checkpoints {
+                            let current_marker = if Some(&cp.id) == index.current.as_ref() { " *" } else { "" };
+                            println!("  {}{}", cp.id, current_marker);
+                            if let Some(msg) = &cp.message {
+                                println!("    Message: {}", msg);
+                            }
+                            println!("    Tree: {}", &cp.tree_root[..7]);
+                            println!("    Time: {}", cp.timestamp);
+                        }
+                    }
+                }
+                CheckpointCommands::Checkout { id } => {
+                    sdal_checkpoint::ops::checkout_checkpoint(&sdal_root, &current_dir, &id)?;
+                    println!("Checked out to checkpoint: {}", id);
+                }
+                CheckpointCommands::Drop { id } => {
+                    sdal_checkpoint::ops::drop_checkpoint(&sdal_root, &id)?;
+                    println!("Dropped checkpoint: {}", id);
+                }
             }
         }
     }

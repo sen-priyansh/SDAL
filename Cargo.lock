@@ -219,6 +219,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdal-checkpoint"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sdal-core",
+ "sdal-storage",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sdal-chunking"
 version = "0.1.0"
 dependencies = [
@@ -235,6 +246,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "sdal-checkpoint",
  "sdal-chunking",
  "sdal-core",
  "sdal-storage",
