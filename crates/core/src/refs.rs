@@ -73,24 +73,18 @@ impl Refs {
         Ok(())
     }
     
-    /// Create a new branch
-    pub fn create_branch(&self, name: &str, commit_hash: &str) -> Result<()> {
-        let branch_ref = format!("refs/heads/{}", name);
-        self.update_ref(&branch_ref, commit_hash)
-    }
-    
-    /// List all branches
+    /// List all branches in the repository
     pub fn list_branches(&self) -> Result<Vec<String>> {
         let heads_dir = self.repo_root.join("refs/heads");
-        let mut branches = Vec::new();
         
         if !heads_dir.exists() {
-            return Ok(branches);
+            return Ok(vec![]);
         }
         
+        let mut branches = Vec::new();
         for entry in fs::read_dir(heads_dir)? {
             let entry = entry?;
-            if entry.file_type()?.is_file() {
+            if entry.path().is_file() {
                 if let Some(name) = entry.file_name().to_str() {
                     branches.push(name.to_string());
                 }
@@ -98,5 +92,77 @@ impl Refs {
         }
         
         Ok(branches)
+    }
+    
+    /// Get the current branch name (if HEAD points to a branch)
+    pub fn get_current_branch(&self) -> Result<Option<String>> {
+        let head_path = self.repo_root.join("HEAD");
+        if !head_path.exists() {
+            return Ok(None);
+        }
+        
+        let content = fs::read_to_string(&head_path)?.trim().to_string();
+        
+        // Check if it's a symbolic ref
+        if content.starts_with("ref: ") {
+            let ref_name = content.strip_prefix("ref: ").unwrap();
+            // Extract branch name from refs/heads/branch_name
+            if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
+                Ok(Some(branch_name.to_string()))
+            } else {
+                Ok(None)
+            }
+        } else {
+            // Detached HEAD
+            Ok(None)
+        }
+    }
+    
+    /// Create a new branch pointing to a commit
+    pub fn create_branch(&self, name: &str, commit_hash: &str) -> Result<()> {
+        let branch_path = self.repo_root.join("refs/heads").join(name);
+        
+        if branch_path.exists() {
+            anyhow::bail!("Branch '{}' already exists", name);
+        }
+        
+        fs::create_dir_all(branch_path.parent().unwrap())?;
+        fs::write(branch_path, commit_hash)?;
+        
+        Ok(())
+    }
+    
+    /// Delete a branch
+    pub fn delete_branch(&self, name: &str) -> Result<()> {
+        let branch_path = self.repo_root.join("refs/heads").join(name);
+        
+        if !branch_path.exists() {
+            anyhow::bail!("Branch '{}' does not exist", name);
+        }
+        
+        // Check if it's the current branch
+        if let Some(current) = self.get_current_branch()? {
+            if current == name {
+                anyhow::bail!("Cannot delete the current branch '{}'", name);
+            }
+        }
+        
+        fs::remove_file(branch_path)?;
+        Ok(())
+    }
+    
+    /// Switch to a different branch
+    pub fn switch_branch(&self, name: &str) -> Result<()> {
+        let branch_path = self.repo_root.join("refs/heads").join(name);
+        
+        if !branch_path.exists() {
+            anyhow::bail!("Branch '{}' does not exist", name);
+        }
+        
+        let head_path = self.repo_root.join("HEAD");
+        let new_head_content = format!("ref: refs/heads/{}", name);
+        fs::write(head_path, new_head_content)?;
+        
+        Ok(())
     }
 }

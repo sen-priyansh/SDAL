@@ -95,6 +95,29 @@ enum Commands {
         files: Vec<PathBuf>,
     },
     
+    // Branching
+    /// Manage branches
+    /// 
+    /// List, create, or delete branches. Branches are lightweight pointers to commits.
+    Branch {
+        /// Branch name (optional - if omitted, lists all branches)
+        name: Option<String>,
+        /// Delete a branch
+        #[arg(short = 'd', long)]
+        delete: bool,
+    },
+    
+    /// Switch branches or restore working tree files
+    /// 
+    /// Switch to a different branch, optionally creating it first.
+    Checkout {
+        /// Branch name to switch to
+        branch: String,
+        /// Create branch before checking out
+        #[arg(short = 'b', long)]
+        create: bool,
+    },
+    
     // Checkpoints
     /// Manage temporary local snapshots (checkpoints)
     /// 
@@ -658,6 +681,73 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Commands::Branch { name, delete } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            let refs = Refs::new(&sdal_root);
+            
+            if delete {
+                // Delete branch
+                let branch_name = name.as_ref().ok_or(anyhow::anyhow!("Branch name required for deletion"))?;
+                refs.delete_branch(branch_name)?;
+                println!("Deleted branch '{}'", branch_name);
+            } else if let Some(branch_name) = name {
+                // Create branch
+                let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet - create an initial commit first"))?;
+                refs.create_branch(&branch_name, &head_hash)?;
+                println!("Created branch '{}'", branch_name);
+            } else {
+                // List branches
+                let branches = refs.list_branches()?;
+                let current = refs.get_current_branch()?;
+                
+                if branches.is_empty() {
+                    println!("No branches yet");
+                } else {
+                    for branch in branches {
+                        let marker = if Some(&branch) == current.as_ref() { "* " } else { "  " };
+                        println!("{}{}", marker, branch);
+                    }
+                }
+            }
+        }
+        Commands::Checkout { branch, create } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            let refs = Refs::new(&sdal_root);
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            
+            if create {
+                // Create branch at current HEAD
+                let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+                refs.create_branch(&branch, &head_hash)?;
+                println!("Created branch '{}'", branch);
+            }
+            
+            // Get target branch commit
+            let branch_ref = format!("refs/heads/{}", branch);
+            let target_hash = refs.read_ref(&branch_ref)?.ok_or(anyhow::anyhow!("Branch '{}' not found", branch))?;
+            
+            // Load commit and restore working directory
+            let commit_data = storage.get(&target_hash)?;
+            let commit_obj: Object = serde_json::from_slice(&commit_data)?;
+            
+            if let Object::Commit(commit) = commit_obj {
+                // Restore working directory from commit tree
+                checkout::restore_tree(&commit.tree, &storage, &current_dir)?;
+                
+                // Update HEAD to point to branch
+                refs.switch_branch(&branch)?;
+                
+                println!("Switched to branch '{}'", branch);
+            } else {
+                anyhow::bail!("Invalid commit object");
             }
         }
         Commands::Checkpoint(cmd) => {
