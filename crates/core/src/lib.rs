@@ -7,6 +7,7 @@ pub mod workdir;
 pub mod index;
 pub mod ignore;
 pub mod checkout;
+pub mod merge;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Blob {
@@ -95,7 +96,7 @@ impl Tree {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Commit {
     pub tree: String,           // hash of root tree
-    pub parent: Option<String>, // hash of parent commit (None for initial)
+    pub parents: Vec<String>,   // parent commit hashes (0=initial, 1=normal, 2=merge)
     pub author: String,
     pub message: String,
     pub timestamp: i64,         // Unix timestamp

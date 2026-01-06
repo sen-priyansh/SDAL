@@ -118,6 +118,15 @@ enum Commands {
         create: bool,
     },
     
+    /// Merge another branch into current branch
+    /// 
+    /// Performs a 3-way merge. Working directory must be clean.
+    /// If conflicts occur, resolve them and run 'sdal commit'.
+    Merge {
+        /// Branch to merge into current branch
+        branch: String,
+    },
+    
     // Checkpoints
     /// Manage temporary local snapshots (checkpoints)
     /// 
@@ -330,13 +339,21 @@ fn main() -> Result<()> {
                 tree_hash
             };
             
-            // Get parent commit (if any)
-            let parent = refs.read_head()?;
+            // Check for merge state
+            let merge_state = sdal_core::merge::MergeState::load(&sdal_root)?;
+            
+            let parents = if let Some(merge_state) = &merge_state {
+                // Merge commit: two parents
+                vec![merge_state.ours.clone(), merge_state.theirs.clone()]
+            } else {
+                // Normal commit: one parent (or none for initial)
+                refs.read_head()?.into_iter().collect()
+            };
             
             // Create commit
             let commit = Commit {
                 tree: tree_hash,
-                parent,
+                parents,
                 author: "user".to_string(), // TODO: Get from config
                 message: message.clone(),
                 timestamp: std::time::SystemTime::now()
@@ -367,6 +384,11 @@ fn main() -> Result<()> {
             
             // Delete all checkpoints (they are now part of commit history)
             sdal_checkpoint::ops::clear_all_checkpoints(&sdal_root)?;
+            
+            // Delete merge state if this was a merge commit
+            if merge_state.is_some() {
+                sdal_core::merge::MergeState::delete(&sdal_root)?;
+            }
             
             println!("Created commit {} \"{}\"", &commit_hash[..7], message);
         }
@@ -400,7 +422,8 @@ fn main() -> Result<()> {
                     println!("Date:   {}", commit.timestamp);
                     println!("\n    {}\n", commit.message);
                     
-                    current = commit.parent;
+                    // Follow first parent (for merge commits, this is the main branch)
+                    current = commit.parents.first().cloned();
                 } else {
                     break;
                 }
@@ -598,7 +621,9 @@ fn main() -> Result<()> {
                     let commit_data = storage.get(&current)?;
                     let obj: Object = serde_json::from_slice(&commit_data)?;
                     if let Object::Commit(c) = obj {
-                        current = c.parent.ok_or(anyhow::anyhow!("No more commits"))?;
+                        current = c.parents.first()
+                            .ok_or(anyhow::anyhow!("No more commits"))?
+                            .clone();
                     }
                 }
                 current
@@ -748,6 +773,65 @@ fn main() -> Result<()> {
                 println!("Switched to branch '{}'", branch);
             } else {
                 anyhow::bail!("Invalid commit object");
+            }
+        }
+        Commands::Merge { branch } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            let refs = Refs::new(&sdal_root);
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let index = Index::load(&sdal_root)?;
+            
+            // Safety check 1: Must be on a branch
+            let current_branch = refs.get_current_branch()?
+                .ok_or(anyhow::anyhow!("Cannot merge in detached HEAD state"))?;
+            
+            // Safety check 2: Cannot merge branch into itself
+            if current_branch == *branch {
+                anyhow::bail!("Cannot merge branch '{}' into itself", branch);
+            }
+            
+            // Safety check 3: Working directory must be clean (no uncommitted changes)
+            if !index.entries.is_empty() {
+                anyhow::bail!("Cannot merge with uncommitted changes. Commit or stash them first.");
+            }
+            
+            // Safety check 4: No checkpoints allowed during merge
+            let checkpoint_index = sdal_checkpoint::ops::list_checkpoints(&sdal_root)?;
+            if !checkpoint_index.checkpoints.is_empty() {
+                anyhow::bail!("Cannot merge with active checkpoints. Commit or drop them first.");
+            }
+            
+            // Get current HEAD
+            let ours_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+            
+            // Perform merge
+            let merge_state = sdal_core::merge::perform_merge(
+                &branch,
+                &ours_hash,
+                &sdal_root,
+                &storage,
+            )?;
+            
+            if merge_state.conflicts.is_empty() {
+                // Clean merge - no conflicts
+                println!("Merge successful! No conflicts.");
+                println!("Run 'sdal commit' to finalize the merge.");
+                
+                // Save merge state for commit
+                merge_state.save(&sdal_root)?;
+            } else {
+                // Conflicts detected
+                println!("Merge conflict! Conflicts in:");
+                for conflict in &merge_state.conflicts {
+                    println!("  - {}", conflict);
+                }
+                println!("\nResolve conflicts manually, then run 'sdal commit'");
+                
+                // Save merge state
+                merge_state.save(&sdal_root)?;
             }
         }
         Commands::Checkpoint(cmd) => {
