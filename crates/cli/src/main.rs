@@ -673,11 +673,11 @@ fn main() -> Result<()> {
                     index.clear();
                     index.save(&sdal_root)?;
 
-                    // Restore working directory from commit
+                    // Restore working directory from commit (clean version removes extra files)
                     let commit_data = storage.get(&target_hash)?;
                     let obj: Object = serde_json::from_slice(&commit_data)?;
                     if let Object::Commit(commit) = obj {
-                        checkout::restore_tree(&commit.tree, &storage, &current_dir)?;
+                        checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
                     }
 
                     println!(
@@ -791,8 +791,8 @@ fn main() -> Result<()> {
             let commit_obj: Object = serde_json::from_slice(&commit_data)?;
 
             if let Object::Commit(commit) = commit_obj {
-                // Restore working directory from commit tree
-                checkout::restore_tree(&commit.tree, &storage, &current_dir)?;
+                // Restore working directory from commit tree (clean version removes extra files)
+                checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
 
                 // Update HEAD to point to branch
                 refs.switch_branch(&branch)?;
@@ -952,16 +952,35 @@ fn build_tree_recursive(
         String,
         std::collections::HashMap<String, String>,
     > = std::collections::HashMap::new();
+    let mut files_at_this_level = std::collections::HashSet::new();
 
     for (path, hash) in entries {
         if let Some(pos) = path.find('/') {
             let (dir_name, remaining) = path.split_at(pos);
             let remaining = &remaining[1..]; // skip '/'
+
+            // Check for file/directory collision
+            if files_at_this_level.contains(dir_name) {
+                anyhow::bail!(
+                    "File/directory name collision: '{}' exists both as a file and as a directory path",
+                    dir_name
+                );
+            }
+
             subfolders
                 .entry(dir_name.to_string())
                 .or_default()
                 .insert(remaining.to_string(), hash.clone());
         } else {
+            // Check for file/directory collision
+            if subfolders.contains_key(path.as_str()) {
+                anyhow::bail!(
+                    "File/directory name collision: '{}' exists both as a file and as a directory path",
+                    path
+                );
+            }
+
+            files_at_this_level.insert(path.clone());
             tree.add_entry(
                 path.clone(),
                 TreeEntry::Blob {

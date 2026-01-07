@@ -93,6 +93,13 @@ impl Tree {
     }
 
     pub fn add_entry(&mut self, name: String, entry: TreeEntry) {
+        // Debug assertion: catch invariant violations in development
+        debug_assert!(
+            !name.contains('/') && !name.contains('\\'),
+            "Tree entry names must not contain path separators. Got: {}",
+            name
+        );
+
         // Invariant: names must not contain path separators
         if name.contains('/') || name.contains('\\') {
             panic!(
