@@ -1,6 +1,9 @@
 //chunking/src/lib.rs
 
+pub mod fastcdc;
 pub mod streamchunker;
+
+pub use fastcdc::FastCDC;
 pub use streamchunker::stream_chunk;
 //importing the stream chunker.
 

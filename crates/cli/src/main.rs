@@ -1,15 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sdal_chunking::stream_chunk;
-use sdal_chunking::{Chunker, FixedSizeChunker};
+use sdal_chunking::{Chunker, FastCDC};
 use sdal_core::{
     Blob, ChunkEntry, Commit, Object, Tree, TreeEntry, checkout, ignore::Ignore, index::Index,
-    refs::Refs, workdir,
+    refs::Refs,
 };
 use sdal_storage::{FilesystemStorage, Storage};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -240,12 +238,13 @@ fn main() -> Result<()> {
 
             // Stage each file
             for (path, rel_path) in files_to_add {
-                // Create blob
-                // Open reference to file not the whole file
-                let file = File::open(&path)?;
-                let total_size = file.metadata()?.len();
+                // Create blob using FastCDC
+                let file_data = std::fs::read(&path)?;
+                let total_size = file_data.len() as u64;
 
-                let chunks = stream_chunk(file, 1024 * 1024)?;
+                // Use FastCDC for content-defined chunking (better deduplication)
+                let chunker = FastCDC::new();
+                let chunks = chunker.chunk(&file_data)?;
 
                 let mut chunk_entries = Vec::new();
                 for chunk in chunks {
@@ -260,16 +259,17 @@ fn main() -> Result<()> {
                 blob.validate()
                     .map_err(|e| anyhow::anyhow!("Blob validation failed: {}", e))?;
 
-                let object = Object::Blob(blob);
-                let blob_json = serde_json::to_vec(&object)?;
+                let blob_object = Object::Blob(blob);
+                let blob_json = serde_json::to_vec(&blob_object)?;
 
                 let mut hasher = Sha256::new();
                 hasher.update(&blob_json);
                 let blob_hash = hex::encode(hasher.finalize());
 
                 storage.put(&blob_hash, &blob_json)?;
-                index.add(rel_path.clone(), blob_hash);
 
+                // Add to index
+                index.add(rel_path.to_string(), blob_hash);
                 println!("add '{}'", rel_path);
             }
 
