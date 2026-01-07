@@ -1,0 +1,94 @@
+﻿cargo : crates\storage\src\lib.rs:3:15: 
+warning: unused import: `self`
+At line:1 char:1
++ cargo check 2>&1 | Out-File -Encoding 
+utf8 log.txt
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: 
+(crate    s\storage\... import: 
+`self`:String) [], Remot    eException
+    + FullyQualifiedErrorId : 
+NativeCommandError
+ 
+warning: `sdal-storage` (lib) generated 1 
+warning (run `cargo fix --lib -p 
+sdal-storage` to apply 1 suggestion)
+warning: unused imports: `Blob` and `Tree`
+ --> crates\core\src\checkout.rs:4:13
+  |
+4 | use crate::{Tree, TreeEntry, Object, 
+Blob};
+  |             ^^^^                     
+^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part 
+of `#[warn(unused)]`) on by default
+
+warning: unused import: `PathBuf`
+ --> crates\core\src\index.rs:1:23
+  |
+1 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused imports: `Write` and `self`
+ --> crates\core\src\refs.rs:3:15
+  |
+3 | use std::io::{self, Write};
+  |               ^^^^  ^^^^^
+
+warning: unused import: `Context`
+ --> crates\core\src\refs.rs:4:22
+  |
+4 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: unused import: `PathBuf`
+ --> crates\core\src\workdir.rs:1:23
+  |
+1 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `Context`
+ --> crates\core\src\workdir.rs:3:22
+  |
+3 | use anyhow::{Result, Context};
+  |                      ^^^^^^^
+
+warning: `sdal-core` (lib) generated 6 
+warnings (run `cargo fix --lib -p 
+sdal-core` to apply 6 suggestions)
+warning: unused imports: `Chunker` and 
+`FixedSizeChunker`
+ --> crates\cli\src\main.rs:4:21
+  |
+4 | use sdal_chunking::{Chunker, 
+FixedSizeChunker};
+  |                     ^^^^^^^  
+^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part 
+of `#[warn(unused)]`) on by default
+
+warning: unused import: `workdir`
+ --> crates\cli\src\main.rs:7:17
+  |
+7 |     refs::Refs, workdir,
+  |                 ^^^^^^^
+
+warning: unused variable: `path`
+   --> crates\cli\src\main.rs:482:18
+    |
+482 |             for (path, rel_path) in 
+&all_files {
+    |                  ^^^^ help: if this 
+is intentional, prefix it with an 
+underscore: `_path`
+    |
+    = note: `#[warn(unused_variables)]` 
+(part of `#[warn(unused)]`) on by default
+
+warning: `sdal-cli` (bin "sdal-cli") 
+generated 3 warnings (run `cargo fix --bin 
+"sdal-cli"` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + 
+debuginfo] target(s) in 0.19s

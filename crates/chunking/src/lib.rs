@@ -1,3 +1,9 @@
+//chunking/src/lib.rs
+
+pub mod streamchunker;
+pub use streamchunker::stream_chunk;
+//importing the stream chunker.
+
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -13,28 +19,30 @@ impl Chunk {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         let hash = hex::encode(hasher.finalize());
-        
+
         let chunk = Self { data, hash, offset };
-        
+
         // Invariant: hash must match data
-        chunk.verify().expect("Chunk creation failed: hash mismatch");
-        
+        chunk
+            .verify()
+            .expect("Chunk creation failed: hash mismatch");
+
         chunk
     }
-    
+
     /// Verify that the hash matches the data
     pub fn verify(&self) -> Result<(), ChunkingError> {
         let mut hasher = Sha256::new();
         hasher.update(&self.data);
         let computed_hash = hex::encode(hasher.finalize());
-        
+
         if computed_hash != self.hash {
             return Err(ChunkingError::Other(format!(
                 "Chunk integrity violation: expected hash {}, got {}",
                 self.hash, computed_hash
             )));
         }
-        
+
         Ok(())
     }
 }
@@ -88,7 +96,7 @@ mod tests {
         assert_eq!(chunks.len(), 5);
         assert_eq!(chunks[0].data, b"hello worl");
         assert_eq!(chunks[0].offset, 0);
-        
+
         // simple hash verification (not full SHA256 check)
         assert!(!chunks[0].hash.is_empty());
     }
