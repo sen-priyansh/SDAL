@@ -1,84 +1,134 @@
-use std::path::{Path, PathBuf};
-use std::fs;
-use anyhow::{Result, Context};
-use crate::{Tree, TreeEntry, Object, Blob};
-use sdal_storage::{Storage, FilesystemStorage};
-use sdal_chunking::{Chunker, FixedSizeChunker};
-use sha2::{Digest, Sha256};
+//crates/core/src/workdir.rs
 
-/// Build a Tree object from a directory on disk
-pub fn build_tree_from_dir<P: AsRef<Path>>(
-    dir: P,
-    storage: &FilesystemStorage,
-) -> Result<String> {
-    let dir = dir.as_ref();
-    let mut tree = Tree::new();
-    
-    let entries = fs::read_dir(dir)?;
-    
+use crate::ignore::Ignore;
+use crate::index::Index;
+use crate::{Blob, ChunkEntry, Object};
+use anyhow::Result;
+use sdal_storage::{FilesystemStorage, Storage};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+/// Collect all files in a directory recursively, respecting ignore patterns
+pub fn collect_files(
+    root: &Path,
+    current: &Path,
+    ignore: &Ignore,
+    files: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
+    let entries = fs::read_dir(current)?;
+
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        
+
+        // Get relative path from root
+        let rel_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string()
+            .replace('\\', "/");
+
         // Skip .sdal directory
-        if name == ".sdal" {
+        if rel_path == ".sdal" || rel_path.starts_with(".sdal/") {
             continue;
         }
-        
+
+        // Check ignore patterns
+        if ignore.should_ignore(&rel_path) {
+            continue;
+        }
+
         let metadata = fs::metadata(&path)?;
-        
+
         if metadata.is_file() {
-            // Create blob for file
-            let data = fs::read(&path)?;
-            let chunker = FixedSizeChunker::new(1024 * 1024);
-            let chunks = chunker.chunk(&data)?;
-            
-            let mut chunk_entries = Vec::new();
-            for chunk in chunks {
-                storage.put(&chunk.hash, &chunk.data)?;
-                chunk_entries.push(crate::ChunkEntry::from(&chunk));
-            }
-            
-            let blob = Blob {
-                chunks: chunk_entries,
-                total_size: data.len() as u64,
-            };
-            blob.validate().map_err(|e| anyhow::anyhow!("Blob validation failed: {}", e))?;
-            
-            let object = Object::Blob(blob);
-            let blob_json = serde_json::to_vec(&object)?;
-            
-            let mut hasher = Sha256::new();
-            hasher.update(&blob_json);
-            let blob_hash = hex::encode(hasher.finalize());
-            
-            storage.put(&blob_hash, &blob_json)?;
-            
-            tree.add_entry(
-                name,
-                TreeEntry::Blob {
-                    hash: blob_hash,
-                    size: metadata.len(),
-                },
-            );
+            files.push((path.clone(), rel_path));
         } else if metadata.is_dir() {
-            // Recursively build tree for subdirectory
-            let subtree_hash = build_tree_from_dir(&path, storage)?;
-            tree.add_entry(name, TreeEntry::Tree { hash: subtree_hash });
+            collect_files(root, &path, ignore, files)?;
         }
     }
-    
-    // Store the tree itself
-    tree.validate().map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
-    let tree_object = Object::Tree(tree);
-    let tree_json = serde_json::to_vec(&tree_object)?;
-    
+
+    Ok(())
+}
+
+/// Stage all files from working directory into the index
+/// This is the ONLY correct way to populate index from disk
+pub fn stage_workdir(
+    root: &Path,
+    index: &mut Index,
+    storage: &FilesystemStorage,
+    ignore: &Ignore,
+) -> Result<()> {
+    let mut files = Vec::new();
+    collect_files(root, root, ignore, &mut files)?;
+
+    for (abs_path, rel_path) in files {
+        let blob_hash = create_blob_from_file(&abs_path, storage)?;
+        index.add(rel_path, blob_hash);
+    }
+
+    Ok(())
+}
+
+/// Create a blob from a file using streaming chunks
+/// This is the ONLY correct way to create blobs in SDAL
+pub fn create_blob_from_file(path: &Path, storage: &FilesystemStorage) -> Result<String> {
+    let file = fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+
+    let mut offset = 0u64;
+    let mut chunks = Vec::new();
+    let chunk_size = 1024 * 1024; // 1MB chunks
+
+    loop {
+        let mut buf = vec![0u8; chunk_size];
+        let bytes_read = reader.read(&mut buf)?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        buf.truncate(bytes_read);
+
+        // Hash the chunk
+        let mut hasher = Sha256::new();
+        hasher.update(&buf);
+        let chunk_hash = hex::encode(hasher.finalize());
+
+        // Store chunk
+        storage.put(&chunk_hash, &buf)?;
+
+        // Add to chunk list
+        chunks.push(ChunkEntry {
+            hash: chunk_hash,
+            offset,
+            size: bytes_read as u64,
+        });
+
+        offset += bytes_read as u64;
+    }
+
+    // Create blob object
+    let blob = Blob {
+        chunks,
+        total_size: offset,
+    };
+
+    // Validate blob
+    blob.validate()
+        .map_err(|e| anyhow::anyhow!("Blob validation failed: {}", e))?;
+
+    // Serialize and store blob
+    let object = Object::Blob(blob);
+    let blob_json = serde_json::to_vec(&object)?;
+
     let mut hasher = Sha256::new();
-    hasher.update(&tree_json);
-    let tree_hash = hex::encode(hasher.finalize());
-    
-    storage.put(&tree_hash, &tree_json)?;
-    
-    Ok(tree_hash)
+    hasher.update(&blob_json);
+    let blob_hash = hex::encode(hasher.finalize());
+
+    storage.put(&blob_hash, &blob_json)?;
+
+    Ok(blob_hash)
 }

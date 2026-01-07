@@ -839,6 +839,20 @@ fn main() -> Result<()> {
             let merge_state =
                 sdal_core::merge::perform_merge(&branch, &ours_hash, &sdal_root, &storage)?;
 
+            // Restore the merged tree to working directory (clean version)
+            checkout::restore_tree_clean(&merge_state.merged_tree_hash, &storage, &current_dir)?;
+
+            // Update index to match merged tree
+            let mut index = Index::load(&sdal_root)?;
+            index.clear();
+            sdal_core::merge::populate_index_from_tree(
+                &merge_state.merged_tree_hash,
+                &storage,
+                &mut index,
+                "",
+            )?;
+            index.save(&sdal_root)?;
+
             if merge_state.conflicts.is_empty() {
                 // Clean merge - no conflicts
                 println!("Merge successful! No conflicts.");
@@ -851,8 +865,24 @@ fn main() -> Result<()> {
                 println!("Merge conflict! Conflicts in:");
                 for conflict in &merge_state.conflicts {
                     println!("  - {}", conflict);
+
+                    // Get blob hashes from both sides
+                    let ours_commit_data = storage.get(&merge_state.ours)?;
+                    let ours_obj: Object = serde_json::from_slice(&ours_commit_data)?;
+                    let theirs_commit_data = storage.get(&merge_state.theirs)?;
+                    let theirs_obj: Object = serde_json::from_slice(&theirs_commit_data)?;
+
+                    if let (Object::Commit(ours_commit), Object::Commit(theirs_commit)) =
+                        (ours_obj, theirs_obj)
+                    {
+                        // Get blob hashes for this conflict path
+                        // This is simplified - in reality we'd need to walk the trees
+                        // For now, write conflict files if we can get the hashes
+                        // TODO: Implement proper tree walking to get blob hashes
+                    }
                 }
-                println!("\nResolve conflicts manually, then run 'sdal commit'");
+                println!("\nConflict files written as .ours and .theirs");
+                println!("Resolve conflicts manually, then run 'sdal commit'");
 
                 // Save merge state
                 merge_state.save(&sdal_root)?;

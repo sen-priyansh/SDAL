@@ -22,6 +22,11 @@ pub trait Storage {
     fn put(&self, hash: &str, data: &[u8]) -> Result<(), StorageError>;
     fn get(&self, hash: &str) -> Result<Vec<u8>, StorageError>;
     fn exists(&self, hash: &str) -> bool;
+
+    /// Stream data from storage into a writer
+    /// This is the preferred method for large objects
+    fn get_stream<W: std::io::Write>(&self, hash: &str, writer: &mut W)
+    -> Result<(), StorageError>;
 }
 
 pub struct FilesystemStorage {
@@ -39,13 +44,30 @@ impl FilesystemStorage {
         Ok(Self { root })
     }
 
-    fn object_path(&self, hash: &str) -> PathBuf {
+    /// Validate hash format to prevent path traversal
+    fn validate_hash(hash: &str) -> Result<(), StorageError> {
+        if hash.len() != 64 {
+            return Err(StorageError::Corruption(format!(
+                "Invalid hash length: expected 64, got {}",
+                hash.len()
+            )));
+        }
+        if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(StorageError::Corruption(format!(
+                "Invalid hash format: must be hexadecimal"
+            )));
+        }
+        Ok(())
+    }
+
+    fn object_path(&self, hash: &str) -> Result<PathBuf, StorageError> {
+        Self::validate_hash(hash)?;
         let (dir, file) = hash.split_at(2);
-        self.root.join("objects").join(dir).join(file)
+        Ok(self.root.join("objects").join(dir).join(file))
     }
 
     /// Verify that data matches the given hash
-    fn verify_hash(hash: &str, data: &[u8]) -> Result<(), StorageError> {
+    fn verify_data_hash(hash: &str, data: &[u8]) -> Result<(), StorageError> {
         let mut hasher = Sha256::new();
         hasher.update(data);
         let computed = hex::encode(hasher.finalize());
@@ -64,9 +86,9 @@ impl FilesystemStorage {
 impl Storage for FilesystemStorage {
     fn put(&self, hash: &str, data: &[u8]) -> Result<(), StorageError> {
         // Invariant: hash must match data
-        Self::verify_hash(hash, data)?;
+        Self::verify_data_hash(hash, data)?;
 
-        let path = self.object_path(hash);
+        let path = self.object_path(hash)?;
 
         // Prevent overwrites - objects are immutable
         if path.exists() {
@@ -88,30 +110,73 @@ impl Storage for FilesystemStorage {
     }
 
     fn get(&self, hash: &str) -> Result<Vec<u8>, StorageError> {
-        let path = self.object_path(hash);
+        let path = self.object_path(hash)?;
         if !path.exists() {
             return Err(StorageError::NotFound(hash.to_string()));
         }
 
-        let data = fs::read(path)?;
-
-        // Invariant: stored data must match its hash
-        Self::verify_hash(hash, &data)?;
+        // Use streaming read with in-memory buffer
+        let mut data = Vec::new();
+        self.get_stream(hash, &mut data)?;
 
         Ok(data)
     }
+
+    fn get_stream<W: std::io::Write>(
+        &self,
+        hash: &str,
+        writer: &mut W,
+    ) -> Result<(), StorageError> {
+        use std::io::Read;
+
+        let path = self.object_path(hash)?;
+        if !path.exists() {
+            return Err(StorageError::NotFound(hash.to_string()));
+        }
+
+        let file = fs::File::open(&path)?;
+        let mut reader = std::io::BufReader::new(file);
+
+        // Stream data in chunks with hash verification
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024]; // 1MB buffer
+
+        loop {
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let chunk = &buffer[..bytes_read];
+            hasher.update(chunk);
+            writer.write_all(chunk)?;
+        }
+
+        // Verify hash after streaming
+        let computed = hex::encode(hasher.finalize());
+        if computed != hash {
+            return Err(StorageError::Corruption(format!(
+                "Hash mismatch: expected {}, computed {}",
+                hash, computed
+            )));
+        }
+
+        Ok(())
+    }
+
     fn exists(&self, hash: &str) -> bool {
-        self.object_path(hash).exists()
+        // Validate hash before checking existence
+        if Self::validate_hash(hash).is_err() {
+            return false;
+        }
+
+        // Safe to unwrap because we just validated
+        self.object_path(hash).unwrap().exists()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    // mock tempfile for now since it's not in workspace
-    // We will just use a random local dir path for basic logic tests if needed,
-    // but without tempfile crate we can't easily do disposable IO tests.
-    // Opting to trust the implementation for now as it's standard FS logic.
+    // Tests would go here
+    // Requires tempfile crate for proper testing
 }

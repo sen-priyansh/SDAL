@@ -1,0 +1,13 @@
+﻿cargo :     Checking sdal-storage v0.1.0 
+(D:\SDAL\crates\storage)
+At line:1 char:1
++ cargo check --package sdal-storage 2>&1 | 
+Out-File -Encoding utf8 sto ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    C 
+   hecking sd...crates\storage):String) [], Remot  
+  eException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `dev` profile [unoptimized + 
+debuginfo] target(s) in 0.29s
