@@ -22,7 +22,8 @@ impl Ignore {
 
         if let Ok(content) = fs::read_to_string(ignore_path) {
             for line in content.lines() {
-                let line = line.trim();
+                // Strip BOM if present and trim whitespace
+                let line = line.trim_start_matches('\u{feff}').trim();
                 if !line.is_empty() && !line.starts_with('#') {
                     ignore.patterns.push(line.to_string());
                 }
@@ -63,9 +64,13 @@ impl Ignore {
             return Self::wildcard_match(path, pattern);
         }
 
-        // Starts with pattern
+        // Standard directory/file match (without trailing slash in pattern)
+        // Pattern "target" should match "target" and "target/foo", but NOT "target_lock"
         if path.starts_with(pattern) {
-            return true;
+            let rest = &path[pattern.len()..];
+            if rest.is_empty() || rest.starts_with('/') {
+                return true;
+            }
         }
 
         false

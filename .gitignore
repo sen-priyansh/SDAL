@@ -3,3 +3,8 @@
 log.txt
 /test_nested
 .sdal
+/test_commit
+verify_merge.ps1
+inspect_repo.ps1
+verify_sdal.ps1
+test_commit_test.ps1

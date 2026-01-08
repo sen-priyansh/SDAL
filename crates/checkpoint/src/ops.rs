@@ -89,7 +89,11 @@ pub fn save_checkpoint(
         hasher.update(&tree_json);
         let tree_hash = hex::encode(hasher.finalize());
 
-        storage.put(&tree_hash, &tree_json)?;
+        if let Err(e) = storage.put(&tree_hash, &tree_json) {
+            if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
+                return Err(e.into());
+            }
+        }
         Ok(tree_hash)
     }
 

@@ -98,7 +98,11 @@ pub fn create_blob_from_file(path: &Path, storage: &FilesystemStorage) -> Result
         let chunk_hash = hex::encode(hasher.finalize());
 
         // Store chunk
-        storage.put(&chunk_hash, &buf)?;
+        if let Err(e) = storage.put(&chunk_hash, &buf) {
+            if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
+                return Err(e.into());
+            }
+        }
 
         // Add to chunk list
         chunks.push(ChunkEntry {
@@ -128,7 +132,11 @@ pub fn create_blob_from_file(path: &Path, storage: &FilesystemStorage) -> Result
     hasher.update(&blob_json);
     let blob_hash = hex::encode(hasher.finalize());
 
-    storage.put(&blob_hash, &blob_json)?;
+    if let Err(e) = storage.put(&blob_hash, &blob_json) {
+        if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
+            return Err(e.into());
+        }
+    }
 
     Ok(blob_hash)
 }

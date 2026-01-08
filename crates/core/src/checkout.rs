@@ -132,8 +132,11 @@ fn remove_unexpected_files(
         let entry = entry?;
         let path = entry.path();
 
-        // Skip .sdal directory
-        if path.file_name().and_then(|n| n.to_str()) == Some(".sdal") {
+        // Get filename for checking
+        let filename = path.file_name().and_then(|n| n.to_str());
+
+        // Skip protected files and directories
+        if matches!(filename, Some(".sdal") | Some(".sdalignore")) {
             continue;
         }
 
@@ -191,11 +194,15 @@ pub fn restore_blob(
         }
 
         // Stream-write chunks directly to file (memory-safe for large files)
-        let mut file = fs::File::create(target_path)?;
+        if target_path.exists() {
+            std::fs::remove_file(target_path)?;
+        }
+        let mut file = std::fs::File::create(target_path)?;
         for chunk_entry in blob.chunks {
             let chunk_data = storage.get(&chunk_entry.hash)?;
             file.write_all(&chunk_data)?;
         }
+        file.sync_all()?;
     }
 
     Ok(())

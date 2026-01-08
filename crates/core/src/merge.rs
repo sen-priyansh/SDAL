@@ -302,7 +302,11 @@ pub fn perform_merge(
     hasher.update(&tree_json);
     let merged_tree_hash = hex::encode(hasher.finalize());
 
-    storage.put(&merged_tree_hash, &tree_json)?;
+    if let Err(e) = storage.put(&merged_tree_hash, &tree_json) {
+        if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
+            return Err(e.into());
+        }
+    }
 
     // Create merge state
     let merge_state = MergeState {
