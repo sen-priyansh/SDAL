@@ -66,7 +66,7 @@ pub fn find_merge_base(
 
         // Load commit and add parents
         let commit_data = storage.get(&hash)?;
-        let obj: Object = serde_json::from_slice(&commit_data)?;
+        let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
         if let Object::Commit(commit) = obj {
             for parent in &commit.parents {
                 queue.push_back(parent.clone());
@@ -92,7 +92,7 @@ pub fn find_merge_base(
 
         // Load commit and add parents
         let commit_data = storage.get(&hash)?;
-        let obj: Object = serde_json::from_slice(&commit_data)?;
+        let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
         if let Object::Commit(commit) = obj {
             for parent in &commit.parents {
                 queue.push_back(parent.clone());
@@ -108,7 +108,7 @@ fn flatten_tree(tree_hash: &str, storage: &FilesystemStorage) -> Result<HashMap<
     let mut result = HashMap::new();
 
     let tree_data = storage.get(tree_hash)?;
-    let obj: Object = serde_json::from_slice(&tree_data)?;
+    let obj = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Tree(tree) = obj {
         for (name, entry) in tree.entries {
@@ -135,7 +135,7 @@ pub fn populate_index_from_tree(
     prefix: &str,
 ) -> Result<()> {
     let tree_data = storage.get(tree_hash)?;
-    let obj: Object = serde_json::from_slice(&tree_data)?;
+    let obj = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Tree(tree) = obj {
         for (name, entry) in tree.entries {
@@ -175,7 +175,7 @@ pub fn write_conflict_files(
         fs::create_dir_all(parent)?;
     }
     let ours_data = storage.get(ours_hash)?;
-    let ours_obj: Object = serde_json::from_slice(&ours_data)?;
+    let ours_obj = Object::from_bytes(&ours_data).map_err(anyhow::Error::msg)?;
     if let Object::Blob(blob) = ours_obj {
         let mut file = fs::File::create(&ours_path)?;
         for chunk_entry in blob.chunks {
@@ -187,7 +187,7 @@ pub fn write_conflict_files(
     // Write .theirs file
     let theirs_path = working_dir.join(format!("{}.theirs", path));
     let theirs_data = storage.get(theirs_hash)?;
-    let theirs_obj: Object = serde_json::from_slice(&theirs_data)?;
+    let theirs_obj = Object::from_bytes(&theirs_data).map_err(anyhow::Error::msg)?;
     if let Object::Blob(blob) = theirs_obj {
         let mut file = fs::File::create(&theirs_path)?;
         for chunk_entry in blob.chunks {
@@ -294,15 +294,14 @@ pub fn perform_merge(
         .validate()
         .map_err(|e| anyhow::anyhow!("Merged tree validation failed: {}", e))?;
 
-    let tree_object = Object::Tree(merged_tree);
-    let tree_json = serde_json::to_vec(&tree_object)?;
+    // Write binary tree
+    let mut tree_bytes = Vec::new();
+    let payload_hash_bytes = merged_tree
+        .write_binary(&mut tree_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize merged tree: {}", e))?;
+    let merged_tree_hash = hex::encode(payload_hash_bytes);
 
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(&tree_json);
-    let merged_tree_hash = hex::encode(hasher.finalize());
-
-    if let Err(e) = storage.put(&merged_tree_hash, &tree_json) {
+    if let Err(e) = storage.put(&merged_tree_hash, &tree_bytes) {
         if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
             return Err(e.into());
         }
@@ -322,7 +321,7 @@ pub fn perform_merge(
 
 fn load_commit(hash: &str, storage: &FilesystemStorage) -> Result<Commit> {
     let data = storage.get(hash)?;
-    let obj: Object = serde_json::from_slice(&data)?;
+    let obj = Object::from_bytes(&data).map_err(anyhow::Error::msg)?;
     if let Object::Commit(commit) = obj {
         Ok(commit)
     } else {

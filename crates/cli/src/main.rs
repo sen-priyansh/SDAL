@@ -302,8 +302,9 @@ fn main() -> Result<()> {
                 .with_context(|| format!("Object not found: {}", hash))?;
 
             // 2. Deserialize
-            let object: Object =
-                serde_json::from_slice(&blob_data).context("Invalid object format")?;
+            let object = Object::from_bytes(&blob_data)
+                .map_err(anyhow::Error::msg)
+                .context("Invalid object format")?;
 
             // Invariant: validate deserialized object
             object
@@ -429,7 +430,7 @@ fn main() -> Result<()> {
                 }
 
                 let commit_data = storage.get(&commit_hash)?;
-                let object: Object = serde_json::from_slice(&commit_data)?;
+                let object = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
 
                 if let Object::Commit(commit) = object {
                     println!("commit {}", commit_hash);
@@ -465,13 +466,9 @@ fn main() -> Result<()> {
             let mut head_files = std::collections::HashMap::new();
             if let Some(head_hash) = refs.read_head()? {
                 if let Ok(commit_data) = storage.get(&head_hash) {
-                    if let Ok(Object::Commit(commit)) =
-                        serde_json::from_slice::<Object>(&commit_data)
-                    {
+                    if let Ok(Object::Commit(commit)) = Object::from_bytes(&commit_data) {
                         if let Ok(tree_data) = storage.get(&commit.tree) {
-                            if let Ok(Object::Tree(tree)) =
-                                serde_json::from_slice::<Object>(&tree_data)
-                            {
+                            if let Ok(Object::Tree(tree)) = Object::from_bytes(&tree_data) {
                                 for (name, entry) in tree.entries {
                                     if let TreeEntry::Blob { hash, .. } = entry {
                                         head_files.insert(name, hash);
@@ -639,9 +636,7 @@ fn main() -> Result<()> {
 
             if let Some(head_hash) = refs.read_head()? {
                 if let Ok(commit_data) = storage.get(&head_hash) {
-                    if let Ok(Object::Commit(commit)) =
-                        serde_json::from_slice::<Object>(&commit_data)
-                    {
+                    if let Ok(Object::Commit(commit)) = Object::from_bytes(&commit_data) {
                         let time_str = {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)?
@@ -699,7 +694,7 @@ fn main() -> Result<()> {
                 let mut current = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
                 for _ in 0..steps {
                     let commit_data = storage.get(&current)?;
-                    let obj: Object = serde_json::from_slice(&commit_data)?;
+                    let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
                     if let Object::Commit(c) = obj {
                         current = c
                             .parents
@@ -773,7 +768,7 @@ fn main() -> Result<()> {
 
                     // Restore working directory from commit (clean version removes extra files)
                     let commit_data = storage.get(&target_hash)?;
-                    let obj: Object = serde_json::from_slice(&commit_data)?;
+                    let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
                     if let Object::Commit(commit) = obj {
                         checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
                     }
@@ -796,11 +791,11 @@ fn main() -> Result<()> {
 
             let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
             let commit_data = storage.get(&head_hash)?;
-            let obj: Object = serde_json::from_slice(&commit_data)?;
+            let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
 
             if let Object::Commit(commit) = obj {
                 let tree_data = storage.get(&commit.tree)?;
-                let tree_obj: Object = serde_json::from_slice(&tree_data)?;
+                let tree_obj = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
                 if let Object::Tree(tree) = tree_obj {
                     for file_path in files {
@@ -886,7 +881,7 @@ fn main() -> Result<()> {
 
             // Load commit and restore working directory
             let commit_data = storage.get(&target_hash)?;
-            let commit_obj: Object = serde_json::from_slice(&commit_data)?;
+            let commit_obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
 
             if let Object::Commit(commit) = commit_obj {
                 // Restore working directory from commit tree (clean version removes extra files)
@@ -966,9 +961,11 @@ fn main() -> Result<()> {
 
                     // Get blob hashes from both sides
                     let ours_commit_data = storage.get(&merge_state.ours)?;
-                    let ours_obj: Object = serde_json::from_slice(&ours_commit_data)?;
+                    let ours_obj =
+                        Object::from_bytes(&ours_commit_data).map_err(anyhow::Error::msg)?;
                     let theirs_commit_data = storage.get(&merge_state.theirs)?;
-                    let theirs_obj: Object = serde_json::from_slice(&theirs_commit_data)?;
+                    let theirs_obj =
+                        Object::from_bytes(&theirs_commit_data).map_err(anyhow::Error::msg)?;
 
                     if let (Object::Commit(ours_commit), Object::Commit(theirs_commit)) =
                         (ours_obj, theirs_obj)
@@ -1128,13 +1125,13 @@ fn build_tree_recursive(
     tree.validate()
         .map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
 
-    let tree_object = Object::Tree(tree);
-    let tree_json = serde_json::to_vec(&tree_object)?;
+    // Write binary tree
+    let mut tree_bytes = Vec::new();
+    let payload_hash_bytes = tree
+        .write_binary(&mut tree_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize tree: {}", e))?;
+    let tree_hash = hex::encode(payload_hash_bytes);
 
-    let mut hasher = Sha256::new();
-    hasher.update(&tree_json);
-    let tree_hash = hex::encode(hasher.finalize());
-
-    storage.put(&tree_hash, &tree_json)?;
+    storage.put(&tree_hash, &tree_bytes)?;
     Ok(tree_hash)
 }

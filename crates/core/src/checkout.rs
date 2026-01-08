@@ -48,7 +48,7 @@ fn restore_tree_recursive(
     prefix: &str,
 ) -> Result<()> {
     let tree_data = storage.get(tree_hash)?;
-    let object: Object = serde_json::from_slice(&tree_data)?;
+    let object = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Tree(tree) = object {
         // Validate tree structure (optional but good for corruption defense)
@@ -85,7 +85,7 @@ fn collect_tree_paths(
     paths: &mut HashSet<String>,
 ) -> Result<()> {
     let tree_data = storage.get(tree_hash)?;
-    let object: Object = serde_json::from_slice(&tree_data)?;
+    let object = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Tree(tree) = object {
         for (name, entry) in tree.entries {
@@ -182,7 +182,7 @@ pub fn restore_blob(
     target_path: &Path,
 ) -> Result<()> {
     let blob_data = storage.get(blob_hash)?;
-    let object: Object = serde_json::from_slice(&blob_data)?;
+    let object = Object::from_bytes(&blob_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Blob(blob) = object {
         // Validate blob structure (optional but good for corruption defense)
