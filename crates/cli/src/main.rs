@@ -1125,12 +1125,16 @@ fn build_tree_recursive(
     tree.validate()
         .map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
 
-    // Write binary tree
+    // Serialize tree to binary format
     let mut tree_bytes = Vec::new();
-    let payload_hash_bytes = tree
-        .write_binary(&mut tree_bytes)
+    tree.write_binary(&mut tree_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to serialize tree: {}", e))?;
-    let tree_hash = hex::encode(payload_hash_bytes);
+
+    // Hash the ENTIRE serialized tree (including headers)
+    // This must match what storage.put() will verify
+    let mut hasher = Sha256::new();
+    hasher.update(&tree_bytes);
+    let tree_hash = hex::encode(hasher.finalize());
 
     storage.put(&tree_hash, &tree_bytes)?;
     Ok(tree_hash)
