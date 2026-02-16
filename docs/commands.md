@@ -1,90 +1,107 @@
 # SDAL Command Reference
 
-## Repository Management
+## Core Workflow
 
-### `sdal init`
-Initialize a new SDAL repository.
-Creates a `.sdal` directory with the necessary structure for version control.
+### `init`
+**Usage**: `sdal init`
+Initializes a new SDAL repository in the current directory.
 
-## Staging and Committing
+### `add`
+**Usage**: `sdal add <files>...`
+Stages files for the next commit.
+-   **Args**:
+    -   `<files>`: File paths to stage. Use `.` for all recursive files.
+-   **Example**: `sdal add src/ main.rs`
 
-### `sdal add <files>...`
-Add files to the staging area.
-- `<files>`: List of files to stage. Use `.` to add all files in the current directory (respects `.sdalignore`).
+### `commit`
+**Usage**: `sdal commit -m <message>`
+Records a snapshot of the staging area.
+-   **Options**:
+    -   `-m, --message <msg>`: Required. Description of changes.
+-   **Note**: Automatically solidifies any active checkpoints.
 
-### `sdal commit`
-Create a new commit from staged changes.
-- `--message`, `-m <msg>`: Commit message describing the changes.
-- **Note**: If checkpoints exist, this command automatically uses the current checkpoint tree and deletes all checkpoints.
+### `status`
+**Usage**: `sdal status`
+Shows the state of the working directory and staging area.
+-   **Output**:
+    -   <span style="color:green">A</span> (Added/Staged)
+    -   <span style="color:yellow">M</span> (Modified)
+    -   <span style="color:red">D</span> (Deleted)
+    -   <span style="color:red">?</span> (Untracked)
 
-## History and Status
+### `log`
+**Usage**: `sdal log`
+Displays the commit history in reverse chronological order.
 
-### `sdal log`
-Show the commit history.
-Displays commits in reverse chronological order with hash, author, date, and message.
+---
 
-### `sdal status`
-Show the working directory status.
-Displays:
-- Staged files (green)
-- Modified files (yellow)
-- Deleted files (red)
-- Untracked files (red)
-- Ghost Checkpoints (if any)
-- Ledger Head status
+## Branching & Merging
 
-## Navigation and Recovery
+### `branch`
+**Usage**: `sdal branch [name] [options]`
+Manages branches.
+-   **Args**:
+    -   `[name]`: Branch name to create. (If omitted, lists branches).
+-   **Options**:
+    -   `-d, --delete`: Deletes the specified branch.
+-   **Example**: `sdal branch feature-login`
 
-### `sdal reset [commit]`
-Reset current HEAD to a specified commit.
-- `[commit]`: Commit hash or reference (e.g., `HEAD`, `HEAD~1`). Defaults to `HEAD`.
-- `--mode <mode>`:
-    - `soft`: Move HEAD only (keep staged and working changes).
-    - `mixed`: Move HEAD and unstage (default, keep working changes).
-    - `hard`: Move HEAD, unstage, and discard all changes.
+### `checkout`
+**Usage**: `sdal checkout <branch> [options]`
+Switches branches or restores working tree files.
+-   **Options**:
+    -   `-b, --create`: Create a new branch and switch to it.
+-   **Example**: `sdal checkout -b new-feature`
 
-### `sdal restore <files>...`
-Restore files from HEAD.
-Discards uncommitted changes and restores files to their state in HEAD.
+### `merge`
+**Usage**: `sdal merge <branch>`
+Merges the specified branch into the current branch (3-way merge).
 
-## Branching
+---
 
-### `sdal branch [name]`
-Manage branches.
-- `[name]`: Name of the branch to create. If omitted, lists all branches.
-- `--delete`, `-d`: Delete the specified branch.
+## Navigation & Recovery
 
-### `sdal checkout <branch>`
-Switch branches or restore working tree files.
-- `<branch>`: Branch name to switch to.
-- `--create`, `-b`: Create the branch before checking out.
+### `reset`
+**Usage**: `sdal reset [commit] --mode <mode>`
+Resets HEAD to a specific state.
+-   **Args**:
+    -   `[commit]`: Target commit (default: `HEAD`).
+-   **Options**:
+    -   `--mode soft`: Moves HEAD only. Staged/Working changes preserved.
+    -   `--mode mixed`: Moves HEAD + Unstages files. Working changes preserved. (Default)
+    -   `--mode hard`: **Destructive**. Moves HEAD + Unstages + Resets Workdir.
 
-### `sdal merge <branch>`
-Merge another branch into the current branch.
-Performs a 3-way merge.
-- `<branch>`: Branch to merge into the current branch.
+### `restore`
+**Usage**: `sdal restore <files>...`
+Discards uncommitted changes in working directory (restores from HEAD).
 
-## Checkpoints
-Manage temporary local snapshots. Checkpoints are automatically deleted when you `commit`.
+---
 
-### `sdal checkpoint save`
-Save current working state as a checkpoint.
-- `[message]`: Optional description.
+## Ghost Checkpoints (WIP)
+*Ephemeral snapshots for "save-scumming" your work without committing.*
 
-### `sdal checkpoint list`
-List all saved checkpoints.
-Shows IDs, messages, and timestamps.
+### `checkpoint save`
+**Usage**: `sdal checkpoint save [message]`
+Saves current state as a checkpoint.
 
-### `sdal checkpoint checkout <id>`
-Restore working directory to a checkpoint.
-- `<id>`: Checkpoint ID (e.g., `cp_0001`).
+### `checkpoint list`
+**Usage**: `sdal checkpoint list`
+Lists all active checkpoints.
 
-### `sdal checkpoint drop <id>`
-Delete a checkpoint.
-- `<id>`: Checkpoint ID to delete.
+### `checkpoint checkout`
+**Usage**: `sdal checkpoint checkout <id>`
+Restores working directory to a specific checkpoint state.
 
-## Debug
+### `checkpoint drop`
+**Usage**: `sdal checkpoint drop <id>`
+Deletes a checkpoint.
 
-### `sdal cat <hash>`
-Display a blob object.
-- `<hash>`: Blob hash to display.
+---
+
+## Debugging
+
+### `cat`
+**Usage**: `sdal cat <hash>`
+Inspects a blob object.
+-   **Args**:
+    -   `<hash>`: The SHA-256 hash of the blob.
