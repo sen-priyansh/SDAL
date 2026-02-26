@@ -1,5 +1,9 @@
 # SDAL
 
+<p align="center">
+  <img src="SDAL_logo.png" alt="SDAL Logo" width="200" />
+</p>
+
 ## Sovereign Decentralized Asset Ledger
 
 > **Version Control for Reality.**
@@ -44,8 +48,8 @@ Save your work without polluting your commit history.
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/sdal
-cd sdal
+git clone https://github.com/sen-priyansh/SDAL.git
+cd SDAL
 cargo build --release
 # Add target/release/sdal to your PATH
 ```
