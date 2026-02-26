@@ -48,8 +48,8 @@ Save your work without polluting your commit history.
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/sdal
-cd sdal
+git clone https://github.com/sen-priyansh/SDAL.git
+cd SDAL
 cargo build --release
 # Add target/release/sdal to your PATH
 ```
