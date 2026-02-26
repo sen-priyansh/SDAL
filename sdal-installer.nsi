@@ -11,13 +11,18 @@
 
 ; MUI Settings
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+!define MUI_ICON "logo.ico"
+!define MUI_UNICON "logo.ico"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "logo_header.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "logo_wizard.bmp"
 
 ; Welcome page
 !insertmacro MUI_PAGE_WELCOME
 ; License page
 !insertmacro MUI_PAGE_LICENSE "LICENSE"
+; Components page
+!insertmacro MUI_PAGE_COMPONENTS
 ; Directory page
 !insertmacro MUI_PAGE_DIRECTORY
 ; Instfiles page
@@ -45,23 +50,29 @@ InstallDir "$PROGRAMFILES64\SDAL"
 ShowInstDetails show
 ShowUnInstDetails show
 
-Section "MainSection" SEC01
+Section "SDAL Core (Required)" SEC01
+  SectionIn RO ; Read-Only, user can't uncheck
   SetOutPath "$INSTDIR"
   SetOverwrite ifnewer
   File "/oname=sdal.exe" "target\release\sdal-cli.exe"
   File "LICENSE"
-  
+SectionEnd
+
+Section "Add to PATH" SEC_PATH
   ; Update PATH
   WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH_SDAL" "$INSTDIR"
   
-  ; Note: This is a simplified way to add to PATH. 
-  ; A robust installer would append to the existing PATH variable.
-  ; We use the Registry method for HKLM (System-wide).
   ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
   WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0;$INSTDIR"
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-
 SectionEnd
+
+; Section descriptions
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC01} "Installs the core SDAL executable and license."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_PATH} "Adds SDAL to your system PATH so you can run 'sdal' from any powershell/cmd."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
 
 Section -AdditionalIcons
   WriteUninstaller "$INSTDIR\uninst.exe"
