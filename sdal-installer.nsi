@@ -11,11 +11,11 @@
 
 ; MUI Settings
 !define MUI_ABORTWARNING
-!define MUI_ICON "logo.ico"
-!define MUI_UNICON "logo.ico"
+!define MUI_ICON "logo_assets\logo.ico"
+!define MUI_UNICON "logo_assets\logo.ico"
 !define MUI_HEADERIMAGE
-!define MUI_HEADERIMAGE_BITMAP "logo_header.bmp"
-!define MUI_WELCOMEFINISHPAGE_BITMAP "logo_wizard.bmp"
+!define MUI_HEADERIMAGE_BITMAP "logo_assets\logo_header.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "logo_assets\logo_wizard.bmp"
 
 ; Welcome page
 !insertmacro MUI_PAGE_WELCOME

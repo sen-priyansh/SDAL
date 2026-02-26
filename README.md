@@ -1,7 +1,7 @@
 # SDAL
 
 <p align="center">
-  <img src="SDAL_logo.png" alt="SDAL Logo" width="200" />
+  <img src="logo_assets/SDAL_logo.png" alt="SDAL Logo" width="200" />
 </p>
 
 ## Sovereign Decentralized Asset Ledger
