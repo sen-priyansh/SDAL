@@ -64,7 +64,6 @@ pub fn find_merge_base(
         }
         ours_ancestors.insert(hash.clone());
 
-        // Load commit and add parents
         let commit_data = storage.get(&hash)?;
         let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
         if let Object::Commit(commit) = obj {
@@ -85,12 +84,10 @@ pub fn find_merge_base(
         }
         visited.insert(hash.clone());
 
-        // Check if this is in ours ancestors
         if ours_ancestors.contains(&hash) {
             return Ok(hash);
         }
 
-        // Load commit and add parents
         let commit_data = storage.get(&hash)?;
         let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
         if let Object::Commit(commit) = obj {
@@ -169,7 +166,6 @@ pub fn write_conflict_files(
 ) -> Result<()> {
     use std::io::Write;
 
-    // Write .ours file
     let ours_path = working_dir.join(format!("{}.ours", path));
     if let Some(parent) = ours_path.parent() {
         fs::create_dir_all(parent)?;
@@ -184,7 +180,6 @@ pub fn write_conflict_files(
         }
     }
 
-    // Write .theirs file
     let theirs_path = working_dir.join(format!("{}.theirs", path));
     let theirs_data = storage.get(theirs_hash)?;
     let theirs_obj = Object::from_bytes(&theirs_data).map_err(anyhow::Error::msg)?;
@@ -211,7 +206,6 @@ pub fn merge_trees(
     let ours_files = flatten_tree(ours_tree_hash, storage)?;
     let theirs_files = flatten_tree(theirs_tree_hash, storage)?;
 
-    // Collect all paths
     let mut all_paths = HashSet::new();
     all_paths.extend(base_files.keys().cloned());
     all_paths.extend(ours_files.keys().cloned());
@@ -227,16 +221,12 @@ pub fn merge_trees(
 
         // 3-way merge logic
         let result_hash = if ours == theirs {
-            // Both sides agree
             ours.cloned()
         } else if base == ours {
-            // We didn't change it, they did
             theirs.cloned()
         } else if base == theirs {
-            // They didn't change it, we did
             ours.cloned()
         } else {
-            // Conflict: both changed differently
             conflicts.push(path.clone());
             None
         };
@@ -262,7 +252,6 @@ pub fn perform_merge(
     repo_root: &Path,
     storage: &FilesystemStorage,
 ) -> Result<MergeState> {
-    // Get theirs commit from target branch
     let branch_ref = format!("refs/heads/{}", target_branch);
     let branch_path = repo_root.join(&branch_ref);
 
@@ -288,7 +277,6 @@ pub fn perform_merge(
         storage,
     )?;
 
-    // Sort and store the merged tree
     merged_tree.sort();
     merged_tree
         .validate()
@@ -307,7 +295,6 @@ pub fn perform_merge(
         }
     }
 
-    // Create merge state
     let merge_state = MergeState {
         ours: ours_hash.to_string(),
         theirs: theirs_hash,

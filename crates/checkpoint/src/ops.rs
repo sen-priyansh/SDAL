@@ -1,6 +1,6 @@
 use crate::{store::CheckpointStore, Checkpoint, CheckpointIndex};
 use anyhow::Result;
-use sdal_core::{checkout, refs::Refs, workdir};
+use sdal_core::{checkout, refs::Refs};
 use sdal_storage::{FilesystemStorage, Storage};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -14,19 +14,15 @@ pub fn save_checkpoint(
     let store = CheckpointStore::new(repo_root);
     let mut index = store.load_index()?;
 
-    // Get current HEAD (may be None if no commits yet)
     let refs = Refs::new(repo_root);
     let parent_commit = refs.read_head()?;
 
-    // Build tree from working directory using proper workflow
     let storage = FilesystemStorage::new(repo_root)?;
     let ignore = sdal_core::ignore::Ignore::load(working_dir);
 
-    // Stage working directory into temporary index
     let mut temp_index = sdal_core::index::Index::new();
     sdal_core::workdir::stage_workdir(working_dir, &mut temp_index, &storage, &ignore)?;
 
-    // Build tree from index
     use sdal_core::{Object, Tree, TreeEntry};
     use std::collections::HashMap;
 
@@ -35,7 +31,6 @@ pub fn save_checkpoint(
         entries_map.insert(path.clone(), hash.clone());
     }
 
-    // Use build_tree_recursive (this function should be in main.rs, but we'll inline it for now)
     fn build_tree_recursive(
         entries: &HashMap<String, String>,
         storage: &FilesystemStorage,
@@ -99,7 +94,6 @@ pub fn save_checkpoint(
 
     let tree_hash = build_tree_recursive(&entries_map, &storage)?;
 
-    // Create checkpoint
     let id = index.next_id();
     let checkpoint = Checkpoint {
         id: id.clone(),
@@ -111,7 +105,6 @@ pub fn save_checkpoint(
         message,
     };
 
-    // Save entry and update index
     store.save_entry(&checkpoint)?;
     index.add(checkpoint);
     store.save_index(&index)?;
@@ -134,17 +127,14 @@ pub fn checkout_checkpoint(
     let store = CheckpointStore::new(repo_root);
     let mut index = store.load_index()?;
 
-    // Find checkpoint
     let checkpoint = index
         .find(checkpoint_id)
         .ok_or(anyhow::anyhow!("Checkpoint '{}' not found", checkpoint_id))?
         .clone();
 
-    // Restore working directory from checkpoint tree
     let storage = FilesystemStorage::new(repo_root)?;
     checkout::restore_tree(&checkpoint.tree_root, &storage, working_dir)?;
 
-    // Update current pointer
     index.current = Some(checkpoint_id.to_string());
     store.save_index(&index)?;
 

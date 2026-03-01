@@ -6,7 +6,7 @@ use sdal_storage::{FilesystemStorage, Storage};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Restore files from a tree object to the working directory
 ///
@@ -27,14 +27,11 @@ pub fn restore_tree_clean(
     storage: &FilesystemStorage,
     target_dir: &Path,
 ) -> Result<()> {
-    // 1. Collect all paths that SHOULD exist in the tree
     let mut expected_paths = HashSet::new();
     collect_tree_paths(tree_hash, storage, "", &mut expected_paths)?;
 
-    // 2. Restore the tree
     restore_tree(tree_hash, storage, target_dir)?;
 
-    // 3. Remove files and directories that shouldn't exist
     remove_unexpected_files(target_dir, target_dir, &expected_paths)?;
 
     Ok(())
@@ -118,29 +115,25 @@ fn remove_unexpected_files(
     current_dir: &Path,
     expected_paths: &HashSet<String>,
 ) -> Result<()> {
-    // Don't remove .sdal directory
     if current_dir.file_name().and_then(|n| n.to_str()) == Some(".sdal") {
         return Ok(());
     }
 
     let entries = match fs::read_dir(current_dir) {
         Ok(entries) => entries,
-        Err(_) => return Ok(()), // Directory doesn't exist, nothing to clean
+        Err(_) => return Ok(()),
     };
 
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
 
-        // Get filename for checking
         let filename = path.file_name().and_then(|n| n.to_str());
 
-        // Skip protected files and directories
         if matches!(filename, Some(".sdal") | Some(".sdalignore")) {
             continue;
         }
 
-        // Get relative path from root
         let rel_path = path
             .strip_prefix(root_dir)
             .unwrap_or(&path)
@@ -149,20 +142,16 @@ fn remove_unexpected_files(
             .replace('\\', "/");
 
         if path.is_dir() {
-            // Recurse into directory first
             remove_unexpected_files(root_dir, &path, expected_paths)?;
 
-            // Remove directory if it's not expected and is now empty
             if !expected_paths.contains(&rel_path) {
                 if let Ok(mut entries) = fs::read_dir(&path) {
                     if entries.next().is_none() {
-                        // Directory is empty, remove it
                         fs::remove_dir(&path)?;
                     }
                 }
             }
         } else if path.is_file() {
-            // Remove file if it's not expected
             if !expected_paths.contains(&rel_path) {
                 fs::remove_file(&path)?;
             }

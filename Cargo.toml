@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*", "test_sdal",
+    "crates/*",
 ]
 
 [workspace.dependencies]

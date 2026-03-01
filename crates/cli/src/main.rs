@@ -196,9 +196,8 @@ fn main() -> Result<()> {
             fs::create_dir(&sdal_root)?;
             FilesystemStorage::new(&sdal_root)?;
 
-            // Create refs structure
             let refs = Refs::new(&sdal_root);
-            refs.create_branch("main", "")?; // Empty initial branch
+            refs.create_branch("main", "")?;
             refs.update_head("ref: refs/heads/main")?;
 
             println!(
@@ -215,11 +214,9 @@ fn main() -> Result<()> {
             let ignore = Ignore::load(&current_dir);
             let mut index = Index::load(&sdal_root)?;
 
-            // Collect files to add
             let mut files_to_add = Vec::new();
             for file_arg in files {
                 if file_arg == Path::new(".") {
-                    // Add all files recursively
                     collect_files(&current_dir, &current_dir, &ignore, &mut files_to_add)?;
                 } else if file_arg.is_file() {
                     let rel_path = file_arg
@@ -236,13 +233,10 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Stage each file
             for (path, rel_path) in files_to_add {
-                // Create blob using FastCDC
                 let file_data = std::fs::read(&path)?;
                 let total_size = file_data.len() as u64;
 
-                // Use FastCDC for content-defined chunking (better deduplication)
                 let chunker = FastCDC::new();
                 let chunks = chunker.chunk(&file_data)?;
 
@@ -282,7 +276,6 @@ fn main() -> Result<()> {
                     Err(e) => return Err(e.into()),
                 }
 
-                // Add to index
                 index.add(rel_path.to_string(), blob_hash);
                 println!("add '{}'", rel_path);
             }
@@ -296,7 +289,6 @@ fn main() -> Result<()> {
 
             let storage = FilesystemStorage::new(&sdal_root)?;
 
-            // 1. Get Blob
             let blob_data = storage
                 .get(&hash)
                 .with_context(|| format!("Object not found: {}", hash))?;
@@ -313,7 +305,6 @@ fn main() -> Result<()> {
 
             match object {
                 Object::Blob(blob) => {
-                    // 3. Reconstruct
                     let mut stdout = io::stdout().lock();
                     for chunk_entry in blob.chunks {
                         let chunk_data = storage.get(&chunk_entry.hash)?;
@@ -337,14 +328,11 @@ fn main() -> Result<()> {
             let refs = Refs::new(&sdal_root);
             let mut index = Index::load(&sdal_root)?;
 
-            // Check if we should use checkpoint tree
             let tree_hash = if let Some(checkpoint_tree) =
                 sdal_checkpoint::ops::get_current_tree(&sdal_root)?
             {
-                // Use tree from current checkpoint
                 checkpoint_tree
             } else {
-                // Build tree from index
                 if index.entries.is_empty() {
                     println!("Nothing to commit (use \"sdal add\" to stage files)");
                     return Ok(());
@@ -353,7 +341,6 @@ fn main() -> Result<()> {
                 build_tree_recursive(&index.entries, &storage)?
             };
 
-            // Check for merge state
             let merge_state = sdal_core::merge::MergeState::load(&sdal_root)?;
 
             let parents = if let Some(merge_state) = &merge_state {
@@ -364,7 +351,6 @@ fn main() -> Result<()> {
                 refs.read_head()?.into_iter().collect()
             };
 
-            // Create commit
             let commit = Commit {
                 tree: tree_hash,
                 parents,
@@ -388,7 +374,6 @@ fn main() -> Result<()> {
 
             storage.put(&commit_hash, &commit_json)?;
 
-            // Update current branch
             let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
             if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
                 refs.update_ref(ref_name, &commit_hash)?;
@@ -401,7 +386,6 @@ fn main() -> Result<()> {
             // Delete all checkpoints (they are now part of commit history)
             sdal_checkpoint::ops::clear_all_checkpoints(&sdal_root)?;
 
-            // Delete merge state if this was a merge commit
             if merge_state.is_some() {
                 sdal_core::merge::MergeState::delete(&sdal_root)?;
             }
@@ -480,7 +464,6 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Collect all working directory files
             let mut all_files = Vec::new();
             collect_files(&current_dir, &current_dir, &ignore, &mut all_files)?;
 
@@ -489,12 +472,10 @@ fn main() -> Result<()> {
             let mut untracked = Vec::new();
             let mut deleted = Vec::new();
 
-            // Categorize files
             for (path, rel_path) in &all_files {
                 if index.is_staged(&rel_path) {
                     // Check if staged file has been modified since staging
                     if let Some(index_hash) = index.entries.get(rel_path) {
-                        // Compute current file hash
                         let file_data = std::fs::read(path)?;
                         let chunker = FastCDC::new();
                         let chunks = chunker.chunk(&file_data)?;
@@ -557,7 +538,6 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Check for deleted files
             let working_files: std::collections::HashSet<_> = all_files
                 .iter()
                 .map(|(_, rel_path)| rel_path.as_str())
@@ -568,25 +548,21 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Display staged files
             for file in &staged {
                 println!("  \x1b[32mA\x1b[0m  {}         (staged)", file);
                 has_changes = true;
             }
 
-            // Display modified files
             for file in &modified {
                 println!("  \x1b[33mM\x1b[0m  {}         (modified)", file);
                 has_changes = true;
             }
 
-            // Display deleted files
             for file in &deleted {
                 println!("  \x1b[31mD\x1b[0m  {}         (deleted)", file);
                 has_changes = true;
             }
 
-            // Display untracked files
             for file in &untracked {
                 println!("  \x1b[31m?\x1b[0m  {}         (untracked)", file);
                 has_changes = true;
@@ -609,7 +585,6 @@ fn main() -> Result<()> {
                     let is_current = Some(&cp.id) == checkpoint_index.current.as_ref();
                     let marker = if is_current { " *" } else { "" };
 
-                    // Calculate relative time
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)?
                         .as_secs() as i64;
@@ -708,25 +683,7 @@ fn main() -> Result<()> {
                 // Assume it's a hash or partial hash
                 // Try to resolve partial hash
                 if commit.len() < 64 {
-                    // List all objects to find match (inefficient but works for now)
-                    // In a real system you'd want an index or efficient prefix search
-                    // For now, checking if storage has a way to list?
-                    // FilesystemStorage doesn't expose list.
-                    // Let's assume user provides enough chars.
-                    // Actually, we can check if it exists if it were full, else scan?
-                    // Since we can't easily scan storage without adding a method,
-                    // and refs.rs doesn't help with objects.
-                    // Let's try to assume it's a prefix and walk the object store?
-                    // That's complex.
-                    // BETTER: Check if it's a valid full hash first.
-                    // If not, and checking existing logic: SDAL requires full hashes currently.
-                    // But we can implement a simple finder helper.
-
-                    // For now, let's just stick to the existing behavior but make sure we error clearly
-                    // OR try to implement prefix matching if possible.
-                    // Given the constraints and current Storage trait, we can't easily list.
-                    // Let's rely on exact match for Full Hash, but ERROR if length < 64 stating requirement.
-                    if commit.len() != 64 {
+                    if commit.len() < 64 {
                         anyhow::bail!(
                             "Short hashes not yet supported. Please use the full 64-character hash from 'sdal log'."
                         );
@@ -737,7 +694,6 @@ fn main() -> Result<()> {
 
             match mode.as_str() {
                 "soft" => {
-                    // Move HEAD only
                     let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
                     if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
                         refs.update_ref(ref_name, &target_hash)?;
@@ -747,7 +703,6 @@ fn main() -> Result<()> {
                     println!("HEAD moved to {}", &target_hash[..7]);
                 }
                 "mixed" => {
-                    // Move HEAD and reset index
                     let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
                     if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
                         refs.update_ref(ref_name, &target_hash)?;
@@ -758,7 +713,6 @@ fn main() -> Result<()> {
                     println!("HEAD moved to {}", &target_hash[..7]);
                 }
                 "hard" => {
-                    // Move HEAD, reset index, and restore working dir
                     let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
                     if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
                         refs.update_ref(ref_name, &target_hash)?;
@@ -805,7 +759,6 @@ fn main() -> Result<()> {
                             .to_string_lossy()
                             .to_string();
 
-                        // Find blob in tree
                         for (name, entry) in &tree.entries {
                             if name == &rel_path {
                                 if let TreeEntry::Blob { hash, .. } = entry {
@@ -826,21 +779,18 @@ fn main() -> Result<()> {
             let refs = Refs::new(&sdal_root);
 
             if delete {
-                // Delete branch
                 let branch_name = name
                     .as_ref()
                     .ok_or(anyhow::anyhow!("Branch name required for deletion"))?;
                 refs.delete_branch(branch_name)?;
                 println!("Deleted branch '{}'", branch_name);
             } else if let Some(branch_name) = name {
-                // Create branch
                 let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!(
                     "No commits yet - create an initial commit first"
                 ))?;
                 refs.create_branch(&branch_name, &head_hash)?;
                 println!("Created branch '{}'", branch_name);
             } else {
-                // List branches
                 let branches = refs.list_branches()?;
                 let current = refs.get_current_branch()?;
 
@@ -867,19 +817,16 @@ fn main() -> Result<()> {
             let storage = FilesystemStorage::new(&sdal_root)?;
 
             if create {
-                // Create branch at current HEAD
                 let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
                 refs.create_branch(&branch, &head_hash)?;
                 println!("Created branch '{}'", branch);
             }
 
-            // Get target branch commit
             let branch_ref = format!("refs/heads/{}", branch);
             let target_hash = refs
                 .read_ref(&branch_ref)?
                 .ok_or(anyhow::anyhow!("Branch '{}' not found", branch))?;
 
-            // Load commit and restore working directory
             let commit_data = storage.get(&target_hash)?;
             let commit_obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
 
@@ -887,7 +834,6 @@ fn main() -> Result<()> {
                 // Restore working directory from commit tree (clean version removes extra files)
                 checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
 
-                // Update HEAD to point to branch
                 refs.switch_branch(&branch)?;
 
                 println!("Switched to branch '{}'", branch);
@@ -925,14 +871,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("Cannot merge with active checkpoints. Commit or drop them first.");
             }
 
-            // Get current HEAD
             let ours_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
 
             // Perform merge
             let merge_state =
                 sdal_core::merge::perform_merge(&branch, &ours_hash, &sdal_root, &storage)?;
 
-            // Restore the merged tree to working directory (clean version)
             checkout::restore_tree_clean(&merge_state.merged_tree_hash, &storage, &current_dir)?;
 
             // Update index to match merged tree
@@ -947,19 +891,15 @@ fn main() -> Result<()> {
             index.save(&sdal_root)?;
 
             if merge_state.conflicts.is_empty() {
-                // Clean merge - no conflicts
                 println!("Merge successful! No conflicts.");
                 println!("Run 'sdal commit' to finalize the merge.");
 
-                // Save merge state for commit
                 merge_state.save(&sdal_root)?;
             } else {
-                // Conflicts detected
                 println!("Merge conflict! Conflicts in:");
                 for conflict in &merge_state.conflicts {
                     println!("  - {}", conflict);
 
-                    // Get blob hashes from both sides
                     let ours_commit_data = storage.get(&merge_state.ours)?;
                     let ours_obj =
                         Object::from_bytes(&ours_commit_data).map_err(anyhow::Error::msg)?;
@@ -967,19 +907,15 @@ fn main() -> Result<()> {
                     let theirs_obj =
                         Object::from_bytes(&theirs_commit_data).map_err(anyhow::Error::msg)?;
 
-                    if let (Object::Commit(ours_commit), Object::Commit(theirs_commit)) =
+                    if let (Object::Commit(_ours_commit), Object::Commit(_theirs_commit)) =
                         (ours_obj, theirs_obj)
                     {
-                        // Get blob hashes for this conflict path
-                        // This is simplified - in reality we'd need to walk the trees
-                        // For now, write conflict files if we can get the hashes
                         // TODO: Implement proper tree walking to get blob hashes
                     }
                 }
                 println!("\nConflict files written as .ours and .theirs");
                 println!("Resolve conflicts manually, then run 'sdal commit'");
 
-                // Save merge state
                 merge_state.save(&sdal_root)?;
             }
         }
@@ -1084,7 +1020,6 @@ fn build_tree_recursive(
             let (dir_name, remaining) = path.split_at(pos);
             let remaining = &remaining[1..]; // skip '/'
 
-            // Check for file/directory collision
             if files_at_this_level.contains(dir_name) {
                 anyhow::bail!(
                     "File/directory name collision: '{}' exists both as a file and as a directory path",
@@ -1097,7 +1032,6 @@ fn build_tree_recursive(
                 .or_default()
                 .insert(remaining.to_string(), hash.clone());
         } else {
-            // Check for file/directory collision
             if subfolders.contains_key(path.as_str()) {
                 anyhow::bail!(
                     "File/directory name collision: '{}' exists both as a file and as a directory path",
@@ -1125,7 +1059,6 @@ fn build_tree_recursive(
     tree.validate()
         .map_err(|e| anyhow::anyhow!("Tree validation failed: {}", e))?;
 
-    // Serialize tree to binary format
     let mut tree_bytes = Vec::new();
     tree.write_binary(&mut tree_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to serialize tree: {}", e))?;

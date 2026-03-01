@@ -93,7 +93,6 @@ impl Tree {
     }
 
     pub fn add_entry(&mut self, name: String, entry: TreeEntry) {
-        // Debug assertion: catch invariant violations in development
         debug_assert!(
             !name.contains('/') && !name.contains('\\'),
             "Tree entry names must not contain path separators. Got: {}",
@@ -130,7 +129,6 @@ impl Tree {
         }
 
         // Invariant 3: Entries should be sorted for deterministic hashing
-        // Check if entries are sorted
         for i in 1..self.entries.len() {
             if self.entries[i - 1].0 > self.entries[i].0 {
                 return Err(format!(
@@ -226,7 +224,6 @@ impl Tree {
                     TreeEntry::Tree { hash } => (1u8, hash),
                 };
 
-                // Decode hex hash to bytes
                 let hash_bytes = hex::decode(hash_str)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
@@ -245,7 +242,6 @@ impl Tree {
             }
         }
 
-        // hash ONLY the payload
         let hash = Sha256::digest(&payload);
         let mut hash_bytes = [0u8; 32];
         hash_bytes.copy_from_slice(&hash);

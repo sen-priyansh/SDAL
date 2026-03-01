@@ -23,7 +23,6 @@ pub fn collect_files(
         let entry = entry?;
         let path = entry.path();
 
-        // Get relative path from root
         let rel_path = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -31,12 +30,10 @@ pub fn collect_files(
             .to_string()
             .replace('\\', "/");
 
-        // Skip .sdal directory
         if rel_path == ".sdal" || rel_path.starts_with(".sdal/") {
             continue;
         }
 
-        // Check ignore patterns
         if ignore.should_ignore(&rel_path) {
             continue;
         }
@@ -92,19 +89,16 @@ pub fn create_blob_from_file(path: &Path, storage: &FilesystemStorage) -> Result
 
         buf.truncate(bytes_read);
 
-        // Hash the chunk
         let mut hasher = Sha256::new();
         hasher.update(&buf);
         let chunk_hash = hex::encode(hasher.finalize());
 
-        // Store chunk
         if let Err(e) = storage.put(&chunk_hash, &buf) {
             if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
                 return Err(e.into());
             }
         }
 
-        // Add to chunk list
         chunks.push(ChunkEntry {
             hash: chunk_hash,
             offset,
@@ -114,17 +108,14 @@ pub fn create_blob_from_file(path: &Path, storage: &FilesystemStorage) -> Result
         offset += bytes_read as u64;
     }
 
-    // Create blob object
     let blob = Blob {
         chunks,
         total_size: offset,
     };
 
-    // Validate blob
     blob.validate()
         .map_err(|e| anyhow::anyhow!("Blob validation failed: {}", e))?;
 
-    // Serialize and store blob
     let object = Object::Blob(blob);
     let blob_json = serde_json::to_vec(&object)?;
 

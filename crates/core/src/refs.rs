@@ -1,8 +1,7 @@
 //crates/core/src/refs.rs
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Reference system for SDAL
@@ -41,7 +40,6 @@ impl Refs {
         }
     }
 
-    /// Read HEAD reference
     pub fn read_head(&self) -> Result<Option<String>> {
         let head_path = self.repo_root.join("HEAD");
         if !head_path.exists() {
@@ -51,12 +49,10 @@ impl Refs {
         let content = fs::read_to_string(&head_path)?;
         let content = content.trim();
 
-        // Check if it's a symbolic ref
         if content.starts_with("ref: ") {
             let ref_name = content.strip_prefix("ref: ").unwrap();
             self.read_ref(ref_name)
         } else {
-            // Direct commit hash - validate it
             if !is_valid_hash(content) {
                 anyhow::bail!("HEAD contains invalid commit hash: {}", content);
             }
@@ -67,11 +63,8 @@ impl Refs {
     /// Update HEAD to point to a ref or commit
     /// Only accepts valid symbolic refs (ref: ...) or valid commit hashes
     pub fn update_head(&self, target: &str) -> Result<()> {
-        // Validate target format
         if target.starts_with("ref: ") {
-            // Symbolic ref - valid
         } else if is_valid_hash(target) {
-            // Direct commit hash - valid
         } else {
             anyhow::bail!("Invalid HEAD target: must be 'ref: <path>' or a valid commit hash");
         }
@@ -81,7 +74,6 @@ impl Refs {
         Ok(())
     }
 
-    /// Read a specific ref
     pub fn read_ref(&self, name: &str) -> Result<Option<String>> {
         let ref_path = self.repo_root.join(name);
         if !ref_path.exists() {
@@ -90,12 +82,10 @@ impl Refs {
 
         let content = fs::read_to_string(&ref_path)?.trim().to_string();
 
-        // Return None if ref is empty (no commits yet)
         if content.is_empty() {
             return Ok(None);
         }
 
-        // Validate that the ref contains a valid hash
         if !is_valid_hash(&content) {
             anyhow::bail!("Ref '{}' contains invalid commit hash: {}", name, content);
         }
@@ -103,9 +93,7 @@ impl Refs {
         Ok(Some(content))
     }
 
-    /// Update a ref to point to a commit
     pub fn update_ref(&self, name: &str, commit_hash: &str) -> Result<()> {
-        // Validate commit hash
         if !commit_hash.is_empty() && !is_valid_hash(commit_hash) {
             anyhow::bail!("Invalid commit hash: {}", commit_hash);
         }
@@ -120,7 +108,6 @@ impl Refs {
         Ok(())
     }
 
-    /// List all branches in the repository
     pub fn list_branches(&self) -> Result<Vec<String>> {
         let heads_dir = self.repo_root.join("refs/heads");
 
@@ -150,27 +137,21 @@ impl Refs {
 
         let content = fs::read_to_string(&head_path)?.trim().to_string();
 
-        // Check if it's a symbolic ref
         if content.starts_with("ref: ") {
             let ref_name = content.strip_prefix("ref: ").unwrap();
-            // Extract branch name from refs/heads/branch_name
             if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
                 Ok(Some(branch_name.to_string()))
             } else {
                 Ok(None)
             }
         } else {
-            // Detached HEAD
             Ok(None)
         }
     }
 
-    /// Create a new branch pointing to a commit
     pub fn create_branch(&self, name: &str, commit_hash: &str) -> Result<()> {
-        // Validate branch name
         validate_branch_name(name)?;
 
-        // Validate commit hash (allow empty for initial branch)
         if !commit_hash.is_empty() && !is_valid_hash(commit_hash) {
             anyhow::bail!("Invalid commit hash: {}", commit_hash);
         }
@@ -187,9 +168,7 @@ impl Refs {
         Ok(())
     }
 
-    /// Delete a branch
     pub fn delete_branch(&self, name: &str) -> Result<()> {
-        // Validate branch name
         validate_branch_name(name)?;
 
         let branch_path = self.repo_root.join("refs/heads").join(name);
@@ -198,7 +177,6 @@ impl Refs {
             anyhow::bail!("Branch '{}' does not exist", name);
         }
 
-        // Check if it's the current branch
         if let Some(current) = self.get_current_branch()? {
             if current == name {
                 anyhow::bail!("Cannot delete the current branch '{}'", name);
@@ -209,9 +187,7 @@ impl Refs {
         Ok(())
     }
 
-    /// Switch to a different branch
     pub fn switch_branch(&self, name: &str) -> Result<()> {
-        // Validate branch name
         validate_branch_name(name)?;
 
         let branch_path = self.repo_root.join("refs/heads").join(name);
