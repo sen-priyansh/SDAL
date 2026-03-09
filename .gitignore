@@ -10,3 +10,5 @@ verify_sdal.ps1
 test_commit_test.ps1
 convert_logo.py
 /docs/execution_timing.md
+personal_sdal_analysis.md
+docs/execution_timing.md

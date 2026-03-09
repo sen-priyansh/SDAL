@@ -63,7 +63,12 @@ enum Commands {
     /// Show the commit history
     ///
     /// Displays commits in reverse chronological order with hash, author, date, and message.
-    Log,
+    /// Use --graph for an ASCII branch graph.
+    Log {
+        /// Show an ASCII graph of branches and commit history
+        #[arg(long)]
+        graph: bool,
+    },
 
     /// Show the working directory status
     ///
@@ -75,18 +80,21 @@ enum Commands {
     Status,
 
     // Navigation and Recovery
-    /// Reset current HEAD to a specified commit
+    /// Restore the working directory to a commit (default: last commit)
+    ///
+    /// With no arguments, discards ALL uncommitted changes and restores
+    /// the working directory to the state of the last commit.
     ///
     /// Modes:
+    ///   --mode hard:  Move HEAD, unstage, and restore all files (default)
+    ///   --mode mixed: Move HEAD and unstage (keep working changes on disk)
     ///   --mode soft:  Move HEAD only (keep staged and working changes)
-    ///   --mode mixed: Move HEAD and unstage (default, keep working changes)
-    ///   --mode hard:  Move HEAD, unstage, and discard all changes
     Reset {
         /// Commit hash or reference (e.g., HEAD, HEAD~1, HEAD~2)
         #[arg(default_value = "HEAD")]
         commit: String,
-        /// Reset mode: soft, mixed, or hard
-        #[arg(long, default_value = "mixed")]
+        /// Reset mode: hard, mixed, or soft
+        #[arg(long, default_value = "hard")]
         mode: String,
     },
 
@@ -145,6 +153,21 @@ enum Commands {
     Cat {
         /// Blob hash to display
         hash: String,
+    },
+
+    /// Undo changes by restoring the last saved checkpoint
+    ///
+    /// Restores your working directory to the most recently saved checkpoint.
+    /// If no checkpoints exist, this command does nothing and informs you.
+    Undo,
+
+    /// Stage all changes and commit in one step
+    ///
+    /// Shortcut for 'sdal add . && sdal commit -m <message>'.
+    /// Respects .sdalignore patterns. Nothing to stage? Skips the commit.
+    Save {
+        /// Commit message
+        message: String,
     },
 }
 
@@ -392,40 +415,41 @@ fn main() -> Result<()> {
 
             println!("Created commit {} \"{}\"", &commit_hash[..7], message);
         }
-        Commands::Log => {
+        Commands::Log { graph } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
 
             let storage = FilesystemStorage::new(&sdal_root)?;
-            let refs = Refs::new(&sdal_root);
 
-            let mut current = refs.read_head()?;
+            if graph {
+                render_log_graph(&sdal_root, &storage)?;
+            } else {
+                let refs = Refs::new(&sdal_root);
+                let mut current = refs.read_head()?;
 
-            if current.is_none() {
-                println!("No commits yet");
-                return Ok(());
-            }
-
-            while let Some(commit_hash) = current {
-                // Skip empty hashes (shouldn't happen but prevents crashes)
-                if commit_hash.is_empty() {
-                    break;
+                if current.is_none() {
+                    println!("No commits yet");
+                    return Ok(());
                 }
 
-                let commit_data = storage.get(&commit_hash)?;
-                let object = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
+                while let Some(commit_hash) = current {
+                    if commit_hash.is_empty() {
+                        break;
+                    }
 
-                if let Object::Commit(commit) = object {
-                    println!("commit {}", commit_hash);
-                    println!("Author: {}", commit.author);
-                    println!("Date:   {}", commit.timestamp);
-                    println!("\n    {}\n", commit.message);
+                    let commit_data = storage.get(&commit_hash)?;
+                    let object = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
 
-                    // Follow first parent (for merge commits, this is the main branch)
-                    current = commit.parents.first().cloned();
-                } else {
-                    break;
+                    if let Object::Commit(commit) = object {
+                        println!("commit {}", commit_hash);
+                        println!("Author: {}", commit.author);
+                        println!("Date:   {}", commit.timestamp);
+                        println!("\n    {}\n", commit.message);
+                        current = commit.parents.first().cloned();
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -451,15 +475,7 @@ fn main() -> Result<()> {
             if let Some(head_hash) = refs.read_head()? {
                 if let Ok(commit_data) = storage.get(&head_hash) {
                     if let Ok(Object::Commit(commit)) = Object::from_bytes(&commit_data) {
-                        if let Ok(tree_data) = storage.get(&commit.tree) {
-                            if let Ok(Object::Tree(tree)) = Object::from_bytes(&tree_data) {
-                                for (name, entry) in tree.entries {
-                                    if let TreeEntry::Blob { hash, .. } = entry {
-                                        head_files.insert(name, hash);
-                                    }
-                                }
-                            }
-                        }
+                        collect_tree_files(&commit.tree, "", &storage, &mut head_files);
                     }
                 }
             }
@@ -968,6 +984,153 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Save { message } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository (run 'sdal init' first)");
+            }
+
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let ignore = Ignore::load(&current_dir);
+            let mut index = Index::load(&sdal_root)?;
+
+            // --- Stage all files (same logic as `sdal add .`) ---
+            let mut files_to_add = Vec::new();
+            collect_files(&current_dir, &current_dir, &ignore, &mut files_to_add)?;
+
+            if files_to_add.is_empty() {
+                println!("Nothing to save — working directory is empty or all files are ignored.");
+                return Ok(());
+            }
+
+            let mut staged_count = 0usize;
+            for (path, rel_path) in files_to_add {
+                let file_data = std::fs::read(&path)?;
+                let total_size = file_data.len() as u64;
+
+                let chunker = sdal_chunking::FastCDC::new();
+                let chunks = chunker.chunk(&file_data)?;
+
+                let mut chunk_entries = Vec::new();
+                for chunk in chunks {
+                    match storage.put(&chunk.hash, &chunk.data) {
+                        Ok(_) => {}
+                        Err(sdal_storage::StorageError::AlreadyExists(_)) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                    chunk_entries.push(ChunkEntry::from(&chunk));
+                }
+
+                let blob = Blob {
+                    chunks: chunk_entries,
+                    total_size,
+                };
+                blob.validate()
+                    .map_err(|e| anyhow::anyhow!("Blob validation failed: {}", e))?;
+
+                let blob_object = Object::Blob(blob);
+                let blob_json = serde_json::to_vec(&blob_object)?;
+
+                let mut hasher = Sha256::new();
+                hasher.update(&blob_json);
+                let blob_hash = hex::encode(hasher.finalize());
+
+                match storage.put(&blob_hash, &blob_json) {
+                    Ok(_) => {}
+                    Err(sdal_storage::StorageError::AlreadyExists(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+
+                index.add(rel_path.to_string(), blob_hash);
+                staged_count += 1;
+            }
+
+            index.save(&sdal_root)?;
+            println!("Staged {} file(s).", staged_count);
+
+            // --- Commit (same logic as `sdal commit`) ---
+            let refs = Refs::new(&sdal_root);
+
+            let tree_hash = if let Some(checkpoint_tree) =
+                sdal_checkpoint::ops::get_current_tree(&sdal_root)?
+            {
+                checkpoint_tree
+            } else {
+                build_tree_recursive(&index.entries, &storage)?
+            };
+
+            let merge_state = sdal_core::merge::MergeState::load(&sdal_root)?;
+
+            let parents = if let Some(merge_state) = &merge_state {
+                vec![merge_state.ours.clone(), merge_state.theirs.clone()]
+            } else {
+                refs.read_head()?.into_iter().collect()
+            };
+
+            let commit = Commit {
+                tree: tree_hash,
+                parents,
+                author: "user".to_string(),
+                message: message.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs() as i64,
+            };
+
+            commit
+                .validate()
+                .map_err(|e| anyhow::anyhow!("Commit validation failed: {}", e))?;
+
+            let commit_object = Object::Commit(commit);
+            let commit_json = serde_json::to_vec(&commit_object)?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(&commit_json);
+            let commit_hash = hex::encode(hasher.finalize());
+
+            storage.put(&commit_hash, &commit_json)?;
+
+            let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
+            if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
+                refs.update_ref(ref_name, &commit_hash)?;
+            }
+
+            index.clear();
+            index.save(&sdal_root)?;
+
+            sdal_checkpoint::ops::clear_all_checkpoints(&sdal_root)?;
+
+            if merge_state.is_some() {
+                sdal_core::merge::MergeState::delete(&sdal_root)?;
+            }
+
+            println!("Saved! Created commit {} \"{}\"", &commit_hash[..7], message);
+        }
+        Commands::Undo => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository (run 'sdal init' first)");
+            }
+
+            let index = sdal_checkpoint::ops::list_checkpoints(&sdal_root)?;
+
+            if index.checkpoints.is_empty() {
+                println!("Nothing to undo — no checkpoints saved.");
+                println!("Tip: use 'sdal checkpoint save <message>' to save a snapshot first.");
+                return Ok(());
+            }
+
+            // The last checkpoint in the list is the most recently saved one
+            let last = index.checkpoints.last().unwrap();
+            let id = last.id.clone();
+            let msg = last
+                .message
+                .clone()
+                .unwrap_or_else(|| "(no message)".to_string());
+
+            sdal_checkpoint::ops::checkout_checkpoint(&sdal_root, &current_dir, &id)?;
+
+            println!("Undone to checkpoint {} — \"{}\"", id, msg);
+            println!("Tip: your other checkpoints are still saved. Use 'sdal checkpoint list' to see them.");
+        }
     }
 
     Ok(())
@@ -1003,6 +1166,40 @@ fn collect_files(
     }
     Ok(())
 }
+
+/// Recursively collect all blob paths and their hashes from a tree,
+/// building full relative paths (e.g. "src/main.rs") separated by '/'.
+fn collect_tree_files(
+    tree_hash: &str,
+    prefix: &str,
+    storage: &FilesystemStorage,
+    out: &mut std::collections::HashMap<String, String>,
+) {
+    let data = match storage.get(tree_hash) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let tree = match Object::from_bytes(&data) {
+        Ok(Object::Tree(t)) => t,
+        _ => return,
+    };
+    for (name, entry) in tree.entries {
+        let full_path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        match entry {
+            TreeEntry::Blob { hash, .. } => {
+                out.insert(full_path, hash);
+            }
+            TreeEntry::Tree { hash } => {
+                collect_tree_files(&hash, &full_path, storage, out);
+            }
+        }
+    }
+}
+
 
 fn build_tree_recursive(
     entries: &std::collections::HashMap<String, String>,
@@ -1069,6 +1266,265 @@ fn build_tree_recursive(
     hasher.update(&tree_bytes);
     let tree_hash = hex::encode(hasher.finalize());
 
-    storage.put(&tree_hash, &tree_bytes)?;
+    match storage.put(&tree_hash, &tree_bytes) {
+        Ok(_) => {}
+        Err(sdal_storage::StorageError::AlreadyExists(_)) => {} // deduplication — this is fine
+        Err(e) => return Err(e.into()),
+    }
     Ok(tree_hash)
+}
+
+/// Format a duration in seconds as a human-readable "X ago" string.
+fn format_time_diff(diff_secs: i64) -> String {
+    if diff_secs < 0 {
+        return "just now".to_string();
+    }
+    if diff_secs < 60 {
+        return format!("{} secs ago", diff_secs);
+    }
+    if diff_secs < 3600 {
+        return format!("{} mins ago", diff_secs / 60);
+    }
+    if diff_secs < 86400 {
+        return format!("{} hours ago", diff_secs / 3600);
+    }
+    format!("{} days ago", diff_secs / 86400)
+}
+
+/// Render an ASCII commit graph to stdout.
+///
+/// Uses a lane-based algorithm: each "lane" (column) tracks the hash of the
+/// next commit expected in that column. As commits are printed top-to-bottom
+/// (newest first), lanes are updated, forked (merge commits), and joined
+/// (shared ancestors).
+fn render_log_graph(sdal_root: &Path, storage: &FilesystemStorage) -> Result<()> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let refs = Refs::new(sdal_root);
+
+    // Build map: commit hash → list of branch names that point to it
+    let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
+    let current_branch = refs.get_current_branch()?;
+    for branch in refs.list_branches()? {
+        let ref_path = format!("refs/heads/{}", branch);
+        if let Some(hash) = refs.read_ref(&ref_path)? {
+            branch_tips.entry(hash).or_default().push(branch.clone());
+        }
+    }
+
+    let head_hash = match refs.read_head()? {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            println!("No commits yet");
+            return Ok(());
+        }
+    };
+
+    // BFS from HEAD to collect all reachable commits
+    let mut commit_map: HashMap<String, sdal_core::Commit> = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(head_hash.clone());
+
+    while let Some(hash) = queue.pop_front() {
+        if hash.is_empty() || visited.contains(&hash) {
+            continue;
+        }
+        visited.insert(hash.clone());
+        if let Ok(data) = storage.get(&hash) {
+            if let Ok(Object::Commit(commit)) = Object::from_bytes(&data) {
+                for p in &commit.parents {
+                    if !p.is_empty() {
+                        queue.push_back(p.clone());
+                    }
+                }
+                commit_map.insert(hash, commit);
+            }
+        }
+    }
+
+    // Sort by timestamp descending (newest first)
+    let mut ordered: Vec<(String, sdal_core::Commit)> = commit_map.into_iter().collect();
+    ordered.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+
+    // lanes[i] = Some(hash) means lane i is waiting for commit `hash`
+    let mut lanes: Vec<Option<String>> = vec![Some(head_hash.clone())];
+    let n_commits = ordered.len();
+
+    for (commit_idx, (hash, commit)) in ordered.iter().enumerate() {
+        // Find all lanes that point to this commit
+        let matching: Vec<usize> = lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                if l.as_deref() == Some(hash.as_str()) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if matching.is_empty() {
+            continue; // unreachable from starting lanes
+        }
+
+        let primary = matching[0];
+        let is_head = hash == &head_hash;
+        let symbol = if is_head { "●" } else { "○" };
+
+        // Parents (filter empty strings)
+        let parents: Vec<String> = commit
+            .parents
+            .iter()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .collect();
+        let is_merge = parents.len() >= 2;
+
+        // Build the prefix (lanes before primary)
+        let mut prefix = String::new();
+        for i in 0..primary {
+            match &lanes[i] {
+                Some(_) => prefix.push_str("│ "),
+                None => prefix.push_str("  "),
+            }
+        }
+
+        // Build the suffix (lanes after primary, excluding secondary matching lanes)
+        let mut suffix = String::new();
+        for i in (primary + 1)..lanes.len() {
+            if matching[1..].contains(&i) {
+                suffix.push_str("  "); // this lane is converging here
+            } else {
+                match &lanes[i] {
+                    Some(_) => suffix.push_str("│ "),
+                    None => suffix.push_str("  "),
+                }
+            }
+        }
+        if is_merge {
+            suffix.push_str("  "); // placeholder for the new lane that appears below
+        }
+        let _suffix = suffix.trim_end();
+
+        // Build ref/branch label
+        let time_str = format_time_diff(now_secs - commit.timestamp);
+        let short_hash = &hash[..7];
+        let ref_label = branch_tips.get(hash).map(|names| {
+            let formatted = names
+                .iter()
+                .map(|b| {
+                    if Some(b) == current_branch.as_ref() {
+                        format!("HEAD -> {}", b)
+                    } else {
+                        b.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" ({})", formatted)
+        });
+
+        // Print commit line
+        println!(
+            "  {}{}  {}  \"{}\" ({}{})",
+            prefix,
+            symbol,
+            short_hash,
+            commit.message,
+            time_str,
+            ref_label.as_deref().unwrap_or("")
+        );
+
+        // ── Update lanes ──────────────────────────────────────────────────
+        // Secondary matching lanes (convergence) are now closed
+        for &sec in &matching[1..] {
+            lanes[sec] = None;
+        }
+        // Primary lane advances to first parent (or closes if none)
+        lanes[primary] = parents.first().cloned();
+        // Merge: insert second parent into a new lane after primary
+        if is_merge {
+            let p1 = &parents[1];
+            let already_in_lane = lanes.iter().any(|l| l.as_deref() == Some(p1));
+            if !already_in_lane {
+                lanes.insert(primary + 1, Some(p1.clone()));
+            }
+        }
+        // Trim trailing empty lanes
+        while lanes.last() == Some(&None) {
+            lanes.pop();
+        }
+
+        // ── Connector / separator lines ───────────────────────────────────
+        if commit_idx >= n_commits - 1 {
+            continue; // last commit — no more lines needed
+        }
+
+        // Detect convergence: two or more lanes now point to the same hash
+        let mut seen_hashes: HashSet<&str> = HashSet::new();
+        let has_convergence = lanes.iter().flatten().any(|h| !seen_hashes.insert(h));
+
+        if is_merge {
+            // Fork connector: ├─╮
+            let mut fork_line = String::new();
+            for i in 0..primary {
+                match &lanes[i] {
+                    Some(_) => fork_line.push_str("│ "),
+                    None => fork_line.push_str("  "),
+                }
+            }
+            fork_line.push_str("├─╮");
+            println!("  {}", fork_line);
+        }
+
+        if has_convergence {
+            // Join connector: ├─╯  (collapse two lanes into one)
+            // Find the two lanes that share a hash
+            let mut first_lane = 0usize;
+            let mut found = false;
+            'outer: for i in 0..lanes.len() {
+                if let Some(h) = &lanes[i] {
+                    for j in (i + 1)..lanes.len() {
+                        if lanes[j].as_deref() == Some(h.as_str()) {
+                            first_lane = i;
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if found {
+                let mut join_line = String::new();
+                for i in 0..first_lane {
+                    match &lanes[i] {
+                        Some(_) => join_line.push_str("│ "),
+                        None => join_line.push_str("  "),
+                    }
+                }
+                join_line.push_str("├─╯");
+                println!("  {}", join_line);
+            }
+        } else {
+            // Regular separator line
+            let mut sep = String::new();
+            for lane in &lanes {
+                match lane {
+                    Some(_) => sep.push_str("│ "),
+                    None => sep.push_str("  "),
+                }
+            }
+            let sep = sep.trim_end();
+            if !sep.is_empty() {
+                println!("  {}", sep);
+            }
+        }
+    }
+
+    Ok(())
 }
