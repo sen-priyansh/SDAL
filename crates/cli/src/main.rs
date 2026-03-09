@@ -740,7 +740,7 @@ fn main() -> Result<()> {
                     let commit_data = storage.get(&target_hash)?;
                     let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
                     if let Object::Commit(commit) = obj {
-                        checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
+                        checkout::restore_tree_clean(&commit.tree, &storage, &current_dir, &Ignore::load(&current_dir))?;
                     }
 
                     println!(
@@ -848,7 +848,7 @@ fn main() -> Result<()> {
 
             if let Object::Commit(commit) = commit_obj {
                 // Restore working directory from commit tree (clean version removes extra files)
-                checkout::restore_tree_clean(&commit.tree, &storage, &current_dir)?;
+                checkout::restore_tree_clean(&commit.tree, &storage, &current_dir, &Ignore::load(&current_dir))?;
 
                 refs.switch_branch(&branch)?;
 
@@ -893,7 +893,7 @@ fn main() -> Result<()> {
             let merge_state =
                 sdal_core::merge::perform_merge(&branch, &ours_hash, &sdal_root, &storage)?;
 
-            checkout::restore_tree_clean(&merge_state.merged_tree_hash, &storage, &current_dir)?;
+            checkout::restore_tree_clean(&merge_state.merged_tree_hash, &storage, &current_dir, &Ignore::load(&current_dir))?;
 
             // Update index to match merged tree
             let mut index = Index::load(&sdal_root)?;

@@ -18,21 +18,22 @@ pub fn restore_tree(tree_hash: &str, storage: &FilesystemStorage, target_dir: &P
     restore_tree_recursive(tree_hash, storage, target_dir, "")
 }
 
-/// Restore files from a tree and remove files that don't exist in the tree
+/// Restore files from a tree and remove files that don't exist in the tree,
+/// while preserving any files/dirs that match the .sdalignore rules.
 ///
-/// This is the "clean" version that ensures the working directory matches the tree exactly.
-/// Use this for operations like `reset --hard` and `checkout`.
+/// This is the "clean" version used for `reset --hard` and `checkout`.
 pub fn restore_tree_clean(
     tree_hash: &str,
     storage: &FilesystemStorage,
     target_dir: &Path,
+    ignore: &crate::ignore::Ignore,
 ) -> Result<()> {
     let mut expected_paths = HashSet::new();
     collect_tree_paths(tree_hash, storage, "", &mut expected_paths)?;
 
     restore_tree(tree_hash, storage, target_dir)?;
 
-    remove_unexpected_files(target_dir, target_dir, &expected_paths)?;
+    remove_unexpected_files(target_dir, target_dir, &expected_paths, ignore)?;
 
     Ok(())
 }
@@ -109,11 +110,13 @@ fn collect_tree_paths(
     Ok(())
 }
 
-/// Remove files and directories that are not in the expected set
+/// Remove files and directories that are not in the expected set,
+/// skipping anything that is ignored by .sdalignore.
 fn remove_unexpected_files(
     root_dir: &Path,
     current_dir: &Path,
     expected_paths: &HashSet<String>,
+    ignore: &crate::ignore::Ignore,
 ) -> Result<()> {
     if current_dir.file_name().and_then(|n| n.to_str()) == Some(".sdal") {
         return Ok(());
@@ -141,8 +144,13 @@ fn remove_unexpected_files(
             .to_string()
             .replace('\\', "/");
 
+        // Never delete ignored files/directories (target/, node_modules/, etc.)
+        if ignore.should_ignore(&rel_path) {
+            continue;
+        }
+
         if path.is_dir() {
-            remove_unexpected_files(root_dir, &path, expected_paths)?;
+            remove_unexpected_files(root_dir, &path, expected_paths, ignore)?;
 
             if !expected_paths.contains(&rel_path) {
                 if let Ok(mut entries) = fs::read_dir(&path) {
