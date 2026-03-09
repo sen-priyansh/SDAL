@@ -36,8 +36,14 @@ enum Commands {
     // Repository Management
     /// Initialize a new SDAL repository
     ///
-    /// Creates a new .sdal directory with the necessary structure for version control.
-    Init,
+    /// Creates a new .sdal directory. Optionally pre-fills .sdalignore from a
+    /// built-in template (rust, nextjs, python, unity, unreal, ml, gamedev),
+    /// a saved custom template name, or a direct file path.
+    Init {
+        /// Template for .sdalignore: built-in name, custom name, or file path
+        #[arg(long)]
+        template: Option<String>,
+    },
 
     // Staging and Committing
     /// Add files to the staging area
@@ -169,6 +175,13 @@ enum Commands {
         /// Commit message
         message: String,
     },
+
+    /// Manage .sdalignore templates
+    ///
+    /// List built-in and custom templates, save new ones, or remove existing ones.
+    /// Custom templates are stored globally in ~/.sdal/templates/.
+    #[command(subcommand)]
+    Template(TemplateCommands),
 }
 
 #[derive(Subcommand)]
@@ -205,13 +218,35 @@ enum CheckpointCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum TemplateCommands {
+    /// List all available templates (built-in + custom)
+    List,
+
+    /// Save a .sdalignore file as a reusable custom template
+    ///
+    /// Templates are stored globally in ~/.sdal/templates/
+    Add {
+        /// Name for the template
+        name: String,
+        /// Path to the .sdalignore file to save
+        path: PathBuf,
+    },
+
+    /// Remove a saved custom template
+    Remove {
+        /// Name of the template to remove
+        name: String,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let current_dir = std::env::current_dir()?;
     let sdal_root = current_dir.join(".sdal");
 
     match cli.command {
-        Commands::Init => {
+        Commands::Init { template } => {
             if sdal_root.exists() {
                 println!("SDAL repository already exists.");
                 return Ok(());
@@ -223,10 +258,80 @@ fn main() -> Result<()> {
             refs.create_branch("main", "")?;
             refs.update_head("ref: refs/heads/main")?;
 
-            println!(
-                "Initialized empty SDAL repository in {}",
-                sdal_root.display()
-            );
+            // Write .sdalignore — empty by default, or pre-filled from template
+            let sdalignore_path = current_dir.join(".sdalignore");
+            if let Some(tmpl_arg) = template {
+                let content = resolve_template(&tmpl_arg)?;
+                fs::write(&sdalignore_path, &content)?;
+                println!(
+                    "Initialized empty SDAL repository in {}",
+                    sdal_root.display()
+                );
+                println!("  ✓ .sdalignore pre-filled from template '{}'", tmpl_arg);
+            } else {
+                fs::write(&sdalignore_path, "")?;
+                println!(
+                    "Initialized empty SDAL repository in {}",
+                    sdal_root.display()
+                );
+                println!("  Tip: use 'sdal init --template <name>' to pre-fill .sdalignore");
+            }
+        }
+        Commands::Template(cmd) => {
+            match cmd {
+                TemplateCommands::List => {
+                    let builtins = [
+                        "rust", "nextjs", "python", "unity", "unreal", "ml", "gamedev",
+                    ];
+                    println!("\nBuilt-in templates:");
+                    for name in &builtins {
+                        println!("  {} sdal init --template {}", name, name);
+                    }
+
+                    let tdir = templates_dir()?;
+                    if tdir.exists() {
+                        let mut customs: Vec<String> = fs::read_dir(&tdir)?
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().is_file())
+                            .filter_map(|e| {
+                                e.path()
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect();
+                        customs.sort();
+                        if !customs.is_empty() {
+                            println!("\nCustom templates (~/.sdal/templates/):");
+                            for name in &customs {
+                                println!("  {} sdal init --template {}", name, name);
+                            }
+                        }
+                    }
+                    println!();
+                }
+                TemplateCommands::Add { name, path } => {
+                    if !path.exists() {
+                        anyhow::bail!("File not found: {}", path.display());
+                    }
+                    let content = fs::read_to_string(&path)?;
+                    let tdir = templates_dir()?;
+                    fs::create_dir_all(&tdir)?;
+                    let dest = tdir.join(format!("{}.sdalignore", name));
+                    fs::write(&dest, &content)?;
+                    println!("  ✓ Saved to {}", dest.display());
+                    println!("    Use with: sdal init --template {}", name);
+                }
+                TemplateCommands::Remove { name } => {
+                    let tdir = templates_dir()?;
+                    let target = tdir.join(format!("{}.sdalignore", name));
+                    if !target.exists() {
+                        anyhow::bail!("Custom template '{}' not found", name);
+                    }
+                    fs::remove_file(&target)?;
+                    println!("  ✓ Removed template '{}'", name);
+                }
+            }
         }
         Commands::Add { files } => {
             if !sdal_root.exists() {
@@ -1527,4 +1632,171 @@ fn render_log_graph(sdal_root: &Path, storage: &FilesystemStorage) -> Result<()>
     }
 
     Ok(())
+}
+
+// ─── Template System Helpers ───────────────────────────────────────────────
+
+const TEMPLATE_RUST: &str = "\
+/target/
+**/*.rs.bk
+*.pdb
+";
+
+const TEMPLATE_NEXTJS: &str = "\
+node_modules/
+.next/
+out/
+.env*.local
+*.tsbuildinfo
+.vercel/
+";
+
+const TEMPLATE_PYTHON: &str = "\
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+*.pyc
+";
+
+const TEMPLATE_UNITY: &str = "\
+/Library/
+/Temp/
+/Logs/
+/Builds/
+/UserSettings/
+*.tmp
+*.unity.meta
+*.pidb.meta
+*.pdb.meta
+";
+
+const TEMPLATE_UNREAL: &str = "\
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+*.VC.db
+*.opensdf
+*.sdf
+*.suo
+*.xcworkspace
+";
+
+const TEMPLATE_ML: &str = "\
+# Model weights — SDAL is built for large binaries, so version these!
+# Uncomment if you want to exclude specific formats:
+# *.pt
+# *.safetensors
+# *.gguf
+
+# Experiments and logs — usually not worth versioning
+wandb/
+runs/
+logs/
+mlruns/
+outputs/
+.neptune/
+
+# Python env
+.venv/
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data — usually too large, store a reference instead
+data/raw/
+data/processed/
+*.csv
+*.parquet
+";
+
+const TEMPLATE_GAMEDEV: &str = "\
+# Build outputs
+/build/
+/dist/
+/out/
+/Builds/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor noise
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Logs
+*.log
+crash_*.txt
+";
+
+/// Return the content of a built-in template by name, or None if unknown.
+fn builtin_template(name: &str) -> Option<&'static str> {
+    match name {
+        "rust"    => Some(TEMPLATE_RUST),
+        "nextjs"  => Some(TEMPLATE_NEXTJS),
+        "python"  => Some(TEMPLATE_PYTHON),
+        "unity"   => Some(TEMPLATE_UNITY),
+        "unreal"  => Some(TEMPLATE_UNREAL),
+        "ml"      => Some(TEMPLATE_ML),
+        "gamedev" => Some(TEMPLATE_GAMEDEV),
+        _ => None,
+    }
+}
+
+/// Resolve a `--template` argument to `.sdalignore` content.
+///
+/// Priority:
+/// 1. If arg starts with `.` or `/` → treat as file path
+/// 2. Built-in name (rust, nextjs, …)
+/// 3. Custom template in ~/.sdal/templates/<name>.sdalignore
+fn resolve_template(arg: &str) -> Result<String> {
+    // 1. File path
+    if arg.starts_with('.') || arg.starts_with('/') || arg.starts_with('~') {
+        let expanded = if arg.starts_with("~/") {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{}{}", home, &arg[1..])
+        } else {
+            arg.to_string()
+        };
+        let content = fs::read_to_string(&expanded)
+            .with_context(|| format!("Cannot read template file: {}", expanded))?;
+        return Ok(content);
+    }
+
+    // 2. Built-in
+    if let Some(content) = builtin_template(arg) {
+        return Ok(content.to_string());
+    }
+
+    // 3. Custom template
+    let custom_path = templates_dir()?.join(format!("{}.sdalignore", arg));
+    if custom_path.exists() {
+        let content = fs::read_to_string(&custom_path)
+            .with_context(|| format!("Cannot read custom template: {}", custom_path.display()))?;
+        return Ok(content);
+    }
+
+    anyhow::bail!(
+        "Template '{}' not found.\n  Built-ins: rust, nextjs, python, unity, unreal, ml, gamedev\n  Run 'sdal template list' to see all available templates.",
+        arg
+    )
+}
+
+/// Path to the global custom templates directory: ~/.sdal/templates/
+fn templates_dir() -> Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .context("Cannot determine home directory ($HOME not set)")?;
+    Ok(std::path::PathBuf::from(home).join(".sdal").join("templates"))
 }
