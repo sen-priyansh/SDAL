@@ -47,9 +47,16 @@ Save your work without polluting your commit history.
 
 ### Installation
 
+#### Linux / macOS
 ```bash
 git clone https://github.com/sen-priyansh/SDAL.git
 cd SDAL
+cargo install --path crates/cli
+ln -sf ~/.cargo/bin/sdal-cli ~/.cargo/bin/sdal
+```
+
+#### Manual Build
+```bash
 cargo build --release
 # Add target/release/sdal to your PATH
 ```
