@@ -144,6 +144,11 @@ enum Commands {
         branch: String,
     },
 
+    /// Open the interactive merge conflict resolution tool
+    ///
+    /// Launches a TUI to resolve any pending merge conflicts in the current repository.
+    Mergetool,
+
     // Checkpoints
     /// Manage temporary local snapshots (checkpoints)
     ///
@@ -1039,6 +1044,14 @@ fn main() -> Result<()> {
 
                 merge_state.save(&sdal_root)?;
             }
+        }
+        Commands::Mergetool => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            
+            // For now, just launch the hello world TUI
+            sdal_tui::run_tui().map_err(|e| anyhow::anyhow!("TUI error: {}", e))?;
         }
         Commands::Checkpoint(cmd) => {
             if !sdal_root.exists() {

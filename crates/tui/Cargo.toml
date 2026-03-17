@@ -1,10 +1,9 @@
 [package]
-name = "hello-ratatui"
+name = "sdal-tui"
 version = "0.1.0"
-description = "A Ratatui Hello World app"
+edition = "2024"
 authors = ["Josh McKinney <joshka@users.noreply.github.com>"]
 license = "MIT"
-edition = "2024"
 
 [dependencies]
 color-eyre = "0.6.3"

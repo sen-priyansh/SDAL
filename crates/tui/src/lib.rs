@@ -1,6 +1,6 @@
 use ratatui::{DefaultTerminal, Frame};
 
-fn main() -> color_eyre::Result<()> {
+pub fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
     color_eyre::install()?;
     ratatui::run(app)?;
     Ok(())

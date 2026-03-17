@@ -284,10 +284,14 @@ pub fn perform_merge(
 
     // Write binary tree
     let mut tree_bytes = Vec::new();
-    let payload_hash_bytes = merged_tree
+    merged_tree
         .write_binary(&mut tree_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to serialize merged tree: {}", e))?;
-    let merged_tree_hash = hex::encode(payload_hash_bytes);
+
+    // Hash the ENTIRE serialized tree (including header), matching what storage.put() verifies
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &tree_bytes);
+    let merged_tree_hash = hex::encode(sha2::Digest::finalize(hasher));
 
     if let Err(e) = storage.put(&merged_tree_hash, &tree_bytes) {
         if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {

@@ -8,6 +8,7 @@ sdal-core = { path = "../core" }
 sdal-storage = { path = "../storage" }
 sdal-chunking = { path = "../chunking" }
 sdal-checkpoint = { path = "../checkpoint" }
+sdal-tui = { path = "../tui" }
 # sdal-policy = { path = "../policy" } # Not used in Phase 1
 clap = { workspace = true }
 anyhow = { workspace = true }
