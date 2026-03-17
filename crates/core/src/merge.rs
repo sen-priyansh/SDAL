@@ -16,6 +16,7 @@ pub struct MergeState {
     pub theirs: String,
     pub target_branch: String,
     pub conflicts: Vec<String>,
+    pub conflict_details: HashMap<String, (String, String)>, // path -> (ours_blob_hash, theirs_blob_hash)
     pub merged_tree_hash: String, // Hash of the merged tree
 }
 
@@ -44,6 +45,93 @@ impl MergeState {
             fs::remove_file(merge_state_path)?;
         }
         Ok(())
+    }
+}
+
+// ─── Conflict tracking (.sdal/CONFLICTS) ───────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConflictEntry {
+    pub path: String,
+    pub ours_blob: String,
+    pub theirs_blob: String,
+    pub resolved: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConflictIndex {
+    pub entries: Vec<ConflictEntry>,
+}
+
+impl ConflictIndex {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn from_merge_state(state: &MergeState) -> Self {
+        let entries = state
+            .conflicts
+            .iter()
+            .map(|path| {
+                let (ours_blob, theirs_blob) = state
+                    .conflict_details
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_default();
+                ConflictEntry {
+                    path: path.clone(),
+                    ours_blob,
+                    theirs_blob,
+                    resolved: false,
+                }
+            })
+            .collect();
+        Self { entries }
+    }
+
+    pub fn load(repo_root: &Path) -> Result<Option<Self>> {
+        let path = repo_root.join("CONFLICTS");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(path)?;
+        let index: ConflictIndex = serde_json::from_str(&content)?;
+        Ok(Some(index))
+    }
+
+    pub fn save(&self, repo_root: &Path) -> Result<()> {
+        let path = repo_root.join("CONFLICTS");
+        let content = serde_json::to_string_pretty(self)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn delete(repo_root: &Path) -> Result<()> {
+        let path = repo_root.join("CONFLICTS");
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    pub fn has_unresolved(&self) -> bool {
+        self.entries.iter().any(|e| !e.resolved)
+    }
+
+    pub fn unresolved_paths(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter(|e| !e.resolved)
+            .map(|e| e.path.as_str())
+            .collect()
+    }
+
+    pub fn mark_resolved(&mut self, path: &str) {
+        for entry in &mut self.entries {
+            if entry.path == path {
+                entry.resolved = true;
+            }
+        }
     }
 }
 
@@ -156,52 +244,14 @@ pub fn populate_index_from_tree(
     Ok(())
 }
 
-/// Write conflict files (.ours and .theirs) for a given path
-pub fn write_conflict_files(
-    path: &str,
-    ours_hash: &str,
-    theirs_hash: &str,
-    storage: &FilesystemStorage,
-    working_dir: &Path,
-) -> Result<()> {
-    use std::io::Write;
-
-    let ours_path = working_dir.join(format!("{}.ours", path));
-    if let Some(parent) = ours_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let ours_data = storage.get(ours_hash)?;
-    let ours_obj = Object::from_bytes(&ours_data).map_err(anyhow::Error::msg)?;
-    if let Object::Blob(blob) = ours_obj {
-        let mut file = fs::File::create(&ours_path)?;
-        for chunk_entry in blob.chunks {
-            let chunk_data = storage.get(&chunk_entry.hash)?;
-            file.write_all(&chunk_data)?;
-        }
-    }
-
-    let theirs_path = working_dir.join(format!("{}.theirs", path));
-    let theirs_data = storage.get(theirs_hash)?;
-    let theirs_obj = Object::from_bytes(&theirs_data).map_err(anyhow::Error::msg)?;
-    if let Object::Blob(blob) = theirs_obj {
-        let mut file = fs::File::create(&theirs_path)?;
-        for chunk_entry in blob.chunks {
-            let chunk_data = storage.get(&chunk_entry.hash)?;
-            file.write_all(&chunk_data)?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Perform 3-way merge on trees
-/// Returns (merged_tree, conflicts)
+/// Returns (merged_tree, conflicts, conflict_details)
 pub fn merge_trees(
     base_tree_hash: &str,
     ours_tree_hash: &str,
     theirs_tree_hash: &str,
     storage: &FilesystemStorage,
-) -> Result<(Tree, Vec<String>)> {
+) -> Result<(Tree, Vec<String>, HashMap<String, (String, String)>)> {
     let base_files = flatten_tree(base_tree_hash, storage)?;
     let ours_files = flatten_tree(ours_tree_hash, storage)?;
     let theirs_files = flatten_tree(theirs_tree_hash, storage)?;
@@ -213,6 +263,7 @@ pub fn merge_trees(
 
     let mut merged_tree = Tree::new();
     let mut conflicts = Vec::new();
+    let mut conflict_details: HashMap<String, (String, String)> = HashMap::new();
 
     for path in all_paths {
         let base = base_files.get(&path);
@@ -228,6 +279,10 @@ pub fn merge_trees(
             ours.cloned()
         } else {
             conflicts.push(path.clone());
+            // Store blob hashes for both sides so conflict files can be written
+            if let (Some(o), Some(t)) = (ours, theirs) {
+                conflict_details.insert(path.clone(), (o.clone(), t.clone()));
+            }
             None
         };
 
@@ -242,7 +297,7 @@ pub fn merge_trees(
         }
     }
 
-    Ok((merged_tree, conflicts))
+    Ok((merged_tree, conflicts, conflict_details))
 }
 
 /// Perform merge operation
@@ -270,7 +325,7 @@ pub fn perform_merge(
     let theirs_commit = load_commit(&theirs_hash, storage)?;
 
     // Merge trees
-    let (mut merged_tree, conflicts) = merge_trees(
+    let (mut merged_tree, conflicts, conflict_details) = merge_trees(
         &base_commit.tree,
         &ours_commit.tree,
         &theirs_commit.tree,
@@ -304,6 +359,7 @@ pub fn perform_merge(
         theirs: theirs_hash,
         target_branch: target_branch.to_string(),
         conflicts,
+        conflict_details,
         merged_tree_hash,
     };
 

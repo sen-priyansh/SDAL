@@ -457,6 +457,19 @@ fn main() -> Result<()> {
                 anyhow::bail!("Not an SDAL repository");
             }
 
+            // Block commit if there are unresolved merge conflicts
+            if let Some(conflict_index) = sdal_core::merge::ConflictIndex::load(&sdal_root)? {
+                if conflict_index.has_unresolved() {
+                    let unresolved = conflict_index.unresolved_paths();
+                    println!("Cannot commit: unresolved merge conflicts:");
+                    for path in &unresolved {
+                        println!("  - {}", path);
+                    }
+                    println!("\nRun 'sdal mergetool' to resolve conflicts.");
+                    return Ok(());
+                }
+            }
+
             let storage = FilesystemStorage::new(&sdal_root)?;
             let refs = Refs::new(&sdal_root);
             let mut index = Index::load(&sdal_root)?;
@@ -521,6 +534,7 @@ fn main() -> Result<()> {
 
             if merge_state.is_some() {
                 sdal_core::merge::MergeState::delete(&sdal_root)?;
+                sdal_core::merge::ConflictIndex::delete(&sdal_root)?;
             }
 
             println!("Created commit {} \"{}\"", &commit_hash[..7], message);
@@ -1026,32 +1040,41 @@ fn main() -> Result<()> {
                 for conflict in &merge_state.conflicts {
                     println!("  - {}", conflict);
 
-                    let ours_commit_data = storage.get(&merge_state.ours)?;
-                    let ours_obj =
-                        Object::from_bytes(&ours_commit_data).map_err(anyhow::Error::msg)?;
-                    let theirs_commit_data = storage.get(&merge_state.theirs)?;
-                    let theirs_obj =
-                        Object::from_bytes(&theirs_commit_data).map_err(anyhow::Error::msg)?;
+                    // We no longer write .ours and .theirs files to the working directory.
+                    // The TUI `sdal mergetool` will read these directly from storage.
+                    // But we DO restore the "ours" version as the base file so the user has something to edit.
+                    if let Some((ours_blob, _theirs_blob)) = merge_state.conflict_details.get(conflict.as_str()) {
 
-                    if let (Object::Commit(_ours_commit), Object::Commit(_theirs_commit)) =
-                        (ours_obj, theirs_obj)
-                    {
-                        // TODO: Implement proper tree walking to get blob hashes
+                        // Also restore the "ours" version as the base file so user has something to edit
+                        let file_path = current_dir.join(conflict);
+                        sdal_core::checkout::restore_blob(ours_blob, &storage, &file_path)?;
                     }
                 }
-                println!("\nConflict files written as .ours and .theirs");
-                println!("Resolve conflicts manually, then run 'sdal commit'");
+                println!("\nConflicts detected but left in object storage.");
+                println!("Resolve conflicts with 'sdal mergetool', then run 'sdal commit'");
 
                 merge_state.save(&sdal_root)?;
+
+                // Save conflicts index for tracking resolution
+                let conflict_index = sdal_core::merge::ConflictIndex::from_merge_state(&merge_state);
+                conflict_index.save(&sdal_root)?;
             }
         }
         Commands::Mergetool => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
-            
-            // For now, just launch the hello world TUI
-            sdal_tui::run_tui().map_err(|e| anyhow::anyhow!("TUI error: {}", e))?;
+
+            // Validate merge is in progress
+            let merge_state_path = sdal_root.join("MERGE_STATE");
+            if !merge_state_path.exists() {
+                anyhow::bail!("No merge in progress. Run 'sdal merge <branch>' first.");
+            }
+
+            sdal_tui::run_tui(&sdal_root, &current_dir)
+                .map_err(|e| anyhow::anyhow!("TUI error: {}", e))?;
+
+            println!("Merge conflicts resolved. Run 'sdal commit' to finalize.");
         }
         Commands::Checkpoint(cmd) => {
             if !sdal_root.exists() {
@@ -1105,6 +1128,19 @@ fn main() -> Result<()> {
         Commands::Save { message } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository (run 'sdal init' first)");
+            }
+
+            // Block save if there are unresolved merge conflicts
+            if let Some(conflict_index) = sdal_core::merge::ConflictIndex::load(&sdal_root)? {
+                if conflict_index.has_unresolved() {
+                    let unresolved = conflict_index.unresolved_paths();
+                    println!("Cannot save: unresolved merge conflicts:");
+                    for path in &unresolved {
+                        println!("  - {}", path);
+                    }
+                    println!("\nRun 'sdal mergetool' to resolve conflicts.");
+                    return Ok(());
+                }
             }
 
             let storage = FilesystemStorage::new(&sdal_root)?;
@@ -1219,6 +1255,7 @@ fn main() -> Result<()> {
 
             if merge_state.is_some() {
                 sdal_core::merge::MergeState::delete(&sdal_root)?;
+                sdal_core::merge::ConflictIndex::delete(&sdal_root)?;
             }
 
             println!("Saved! Created commit {} \"{}\"", &commit_hash[..7], message);

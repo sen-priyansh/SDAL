@@ -1351,9 +1351,14 @@ dependencies = [
 name = "sdal-tui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "color-eyre",
  "crossterm",
  "ratatui",
+ "sdal-core",
+ "sdal-storage",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
