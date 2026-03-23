@@ -86,30 +86,26 @@ enum Commands {
     Status,
 
     // Navigation and Recovery
-    /// Restore the working directory to a commit (default: last commit)
+    /// Hard reset the working directory to the most recent commit (HEAD)
     ///
-    /// With no arguments, discards ALL uncommitted changes and restores
-    /// the working directory to the state of the last commit.
-    ///
-    /// Modes:
-    ///   --mode hard:  Move HEAD, unstage, and restore all files (default)
-    ///   --mode mixed: Move HEAD and unstage (keep working changes on disk)
-    ///   --mode soft:  Move HEAD only (keep staged and working changes)
-    Reset {
-        /// Commit hash or reference (e.g., HEAD, HEAD~1, HEAD~2)
-        #[arg(default_value = "HEAD")]
-        commit: String,
-        /// Reset mode: hard, mixed, or soft
-        #[arg(long, default_value = "hard")]
-        mode: String,
-    },
+    /// Discards ALL uncommitted changes (staged and unstaged) and restores
+    /// the working directory to exactly match the most recent commit.
+    /// Ignored files (from .sdalignore) are never touched.
+    Reset,
 
-    /// Restore files from HEAD
+    /// Travel to any commit in the history
     ///
-    /// Discards uncommitted changes and restores files to their state in HEAD.
+    /// Restores the working directory to match a specific past commit.
+    /// Does NOT move your branch pointer or HEAD — use 'sdal reset' to come back.
+    ///
+    /// Examples:
+    ///   sdal restore <hash>   — restore to a specific commit (7+ char hash)
+    ///   sdal restore -1       — go 1 commit back from HEAD
+    ///   sdal restore -3       — go 3 commits back from HEAD
     Restore {
-        /// Files to restore from HEAD
-        files: Vec<PathBuf>,
+        /// Commit hash (7+ chars) or relative offset (-1, -2, …)
+        #[arg(allow_hyphen_values = true, value_name = "TARGET")]
+        target: String,
     },
 
     // Branching
@@ -787,7 +783,7 @@ fn main() -> Result<()> {
             }
             println!();
         }
-        Commands::Reset { commit, mode } => {
+        Commands::Reset => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
@@ -796,86 +792,26 @@ fn main() -> Result<()> {
             let refs = Refs::new(&sdal_root);
             let mut index = Index::load(&sdal_root)?;
 
-            // Resolve commit reference with partial matching
-            let target_hash = if commit == "HEAD" {
-                refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?
-            } else if commit.starts_with("HEAD~") {
-                // Simple HEAD~N support
-                let steps = commit
-                    .strip_prefix("HEAD~")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .ok_or(anyhow::anyhow!("Invalid reference: {}", commit))?;
+            let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
 
-                let mut current = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
-                for _ in 0..steps {
-                    let commit_data = storage.get(&current)?;
-                    let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
-                    if let Object::Commit(c) = obj {
-                        current = c
-                            .parents
-                            .first()
-                            .ok_or(anyhow::anyhow!("No more commits"))?
-                            .clone();
-                    }
-                }
-                current
-            } else {
-                // Assume it's a hash or partial hash
-                // Try to resolve partial hash
-                if commit.len() < 64 {
-                    if commit.len() < 64 {
-                        anyhow::bail!(
-                            "Short hashes not yet supported. Please use the full 64-character hash from 'sdal log'."
-                        );
-                    }
-                }
-                commit.clone()
-            };
+            // Hard reset: clear staged index, restore all files from HEAD
+            index.clear();
+            index.save(&sdal_root)?;
 
-            match mode.as_str() {
-                "soft" => {
-                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
-                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
-                        refs.update_ref(ref_name, &target_hash)?;
-                    }
-
-                    // Note: Reset soft usually leaves index/workdir alone
-                    println!("HEAD moved to {}", &target_hash[..7]);
-                }
-                "mixed" => {
-                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
-                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
-                        refs.update_ref(ref_name, &target_hash)?;
-                    }
-                    index.clear();
-                    index.save(&sdal_root)?;
-                    println!("Unstaged changes after reset:");
-                    println!("HEAD moved to {}", &target_hash[..7]);
-                }
-                "hard" => {
-                    let head_content = fs::read_to_string(sdal_root.join("HEAD"))?;
-                    if let Some(ref_name) = head_content.trim().strip_prefix("ref: ") {
-                        refs.update_ref(ref_name, &target_hash)?;
-                    }
-                    index.clear();
-                    index.save(&sdal_root)?;
-
-                    // Restore working directory from commit (clean version removes extra files)
-                    let commit_data = storage.get(&target_hash)?;
-                    let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
-                    if let Object::Commit(commit) = obj {
-                        checkout::restore_tree_clean(&commit.tree, &storage, &current_dir, &Ignore::load(&current_dir))?;
-                    }
-
-                    println!(
-                        "HEAD is now at {} (working directory restored)",
-                        &target_hash[..7]
-                    );
-                }
-                _ => anyhow::bail!("Invalid mode: {}. Use soft, mixed, or hard", mode),
+            let commit_data = storage.get(&head_hash)?;
+            let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
+            if let Object::Commit(commit) = obj {
+                checkout::restore_tree_clean(
+                    &commit.tree,
+                    &storage,
+                    &current_dir,
+                    &Ignore::load(&current_dir),
+                )?;
             }
+
+            println!("HEAD is now at {} (working directory restored)", &head_hash[..7]);
         }
-        Commands::Restore { files } => {
+        Commands::Restore { target } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
@@ -883,34 +819,58 @@ fn main() -> Result<()> {
             let storage = FilesystemStorage::new(&sdal_root)?;
             let refs = Refs::new(&sdal_root);
 
-            let head_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
-            let commit_data = storage.get(&head_hash)?;
-            let obj = Object::from_bytes(&commit_data).map_err(anyhow::Error::msg)?;
-
-            if let Object::Commit(commit) = obj {
-                let tree_data = storage.get(&commit.tree)?;
-                let tree_obj = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
-
-                if let Object::Tree(tree) = tree_obj {
-                    for file_path in files {
-                        let rel_path = file_path
-                            .strip_prefix(&current_dir)
-                            .unwrap_or(&file_path)
-                            .to_string_lossy()
-                            .to_string();
-
-                        for (name, entry) in &tree.entries {
-                            if name == &rel_path {
-                                if let TreeEntry::Blob { hash, .. } = entry {
-                                    checkout::restore_blob(hash, &storage, &file_path)?;
-                                    println!("Restored '{}'", rel_path);
-                                }
-                            }
-                        }
+            // Resolve target: "-N" = N steps back from HEAD, else treat as hash prefix
+            let target_hash = if let Some(steps_str) = target.strip_prefix('-') {
+                let steps = steps_str.parse::<usize>().map_err(|_| {
+                    anyhow::anyhow!("Invalid offset '{}'. Use -1, -2, etc.", target)
+                })?;
+                let mut current = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+                for i in 0..steps {
+                    let data = storage.get(&current)?;
+                    let obj = Object::from_bytes(&data).map_err(anyhow::Error::msg)?;
+                    if let Object::Commit(c) = obj {
+                        current = c.parents
+                            .into_iter()
+                            .find(|p| !p.is_empty())
+                            .ok_or(anyhow::anyhow!(
+                                "Only {} commit(s) in history, cannot go back {}",
+                                i + 1,
+                                steps
+                            ))?;
+                    } else {
+                        anyhow::bail!("Unexpected object type while walking history");
                     }
                 }
+                current
+            } else {
+                // Resolve partial hash (at least 7 chars)
+                if target.len() < 7 {
+                    anyhow::bail!("Hash too short. Use at least 7 characters (from 'sdal log').");
+                }
+                resolve_partial_hash(&target, &refs, &storage)?
+            };
+
+            // Restore working directory to the target commit WITHOUT moving HEAD/branch
+            let data = storage.get(&target_hash)?;
+            let obj = Object::from_bytes(&data).map_err(anyhow::Error::msg)?;
+            if let Object::Commit(commit) = obj {
+                checkout::restore_tree_clean(
+                    &commit.tree,
+                    &storage,
+                    &current_dir,
+                    &Ignore::load(&current_dir),
+                )?;
+                println!(
+                    "Working directory restored to {} \"{}\" (HEAD/branch unchanged)",
+                    &target_hash[..7],
+                    commit.message
+                );
+                println!("  Tip: run 'sdal reset' to return to the latest commit");
+            } else {
+                anyhow::bail!("{} is not a commit object", &target_hash[..7]);
             }
         }
+
         Commands::Branch { name, delete } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
@@ -1475,11 +1435,21 @@ fn render_log_graph(sdal_root: &Path, storage: &FilesystemStorage) -> Result<()>
         }
     };
 
-    // BFS from HEAD to collect all reachable commits
+    // BFS from HEAD + ALL branch tips to collect the entire reachable history.
+    // This ensures commits on branches not reachable from HEAD are still shown.
     let mut commit_map: HashMap<String, sdal_core::Commit> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(head_hash.clone());
+    // Seed from every branch tip
+    for branch in refs.list_branches()? {
+        let ref_path = format!("refs/heads/{}", branch);
+        if let Some(h) = refs.read_ref(&ref_path)? {
+            if !h.is_empty() {
+                queue.push_back(h);
+            }
+        }
+    }
 
     while let Some(hash) = queue.pop_front() {
         if hash.is_empty() || visited.contains(&hash) {
@@ -1506,8 +1476,13 @@ fn render_log_graph(sdal_root: &Path, storage: &FilesystemStorage) -> Result<()>
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    // lanes[i] = Some(hash) means lane i is waiting for commit `hash`
+    // Lanes: seed HEAD first, then all other branch tips as parallel lanes
     let mut lanes: Vec<Option<String>> = vec![Some(head_hash.clone())];
+    for hash in branch_tips.keys() {
+        if hash != &head_hash && !lanes.iter().any(|l| l.as_deref() == Some(hash)) {
+            lanes.push(Some(hash.clone()));
+        }
+    }
     let n_commits = ordered.len();
 
     for (commit_idx, (hash, commit)) in ordered.iter().enumerate() {
@@ -1849,4 +1824,63 @@ fn templates_dir() -> Result<std::path::PathBuf> {
     let home = std::env::var("HOME")
         .context("Cannot determine home directory ($HOME not set)")?;
     Ok(std::path::PathBuf::from(home).join(".sdal").join("templates"))
+}
+
+/// Resolve a short or full commit hash by scanning all commits reachable from any branch.
+fn resolve_partial_hash(
+    prefix: &str,
+    refs: &sdal_core::refs::Refs,
+    storage: &FilesystemStorage,
+) -> anyhow::Result<String> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut matches: Vec<String> = Vec::new();
+
+    // Seed from all branches + HEAD
+    for branch in refs.list_branches()? {
+        let ref_path = format!("refs/heads/{}", branch);
+        if let Some(h) = refs.read_ref(&ref_path)? {
+            if !h.is_empty() {
+                queue.push_back(h);
+            }
+        }
+    }
+    if let Some(h) = refs.read_head()? {
+        if !h.is_empty() {
+            queue.push_back(h);
+        }
+    }
+
+    while let Some(hash) = queue.pop_front() {
+        if hash.is_empty() || visited.contains(&hash) {
+            continue;
+        }
+        visited.insert(hash.clone());
+
+        if hash.starts_with(prefix) {
+            matches.push(hash.clone());
+        }
+
+        if let Ok(data) = storage.get(&hash) {
+            if let Ok(Object::Commit(commit)) = Object::from_bytes(&data) {
+                for p in &commit.parents {
+                    if !p.is_empty() {
+                        queue.push_back(p.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => anyhow::bail!("No commit found matching '{}'. Check 'sdal log' for hashes.", prefix),
+        1 => Ok(matches.remove(0)),
+        _ => anyhow::bail!(
+            "Ambiguous hash '{}' matches {} commits. Use more characters.",
+            prefix,
+            matches.len()
+        ),
+    }
 }
