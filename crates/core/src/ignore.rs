@@ -48,20 +48,23 @@ impl Ignore {
             return true;
         }
 
-        if pattern.ends_with('/') {
-            let dir_pattern = pattern.trim_end_matches('/');
-            if path == dir_pattern || path.starts_with(&format!("{}/", dir_pattern)) {
-                return true;
-            }
-        }
+        let is_dir_only = pattern.ends_with('/');
+        let pattern_core = if is_dir_only {
+            pattern.trim_end_matches('/')
+        } else {
+            pattern
+        };
 
-        if pattern.contains('*') {
+        if pattern_core.contains('*') {
             return Self::wildcard_match(path, pattern);
         }
 
-        if path.starts_with(pattern) {
-            let rest = &path[pattern.len()..];
-            if rest.is_empty() || rest.starts_with('/') {
+        if !pattern_core.contains('/') {
+            if path.split('/').any(|comp| comp == pattern_core) {
+                return true;
+            }
+        } else {
+            if path == pattern_core || path.starts_with(&format!("{}/", pattern_core)) {
                 return true;
             }
         }
