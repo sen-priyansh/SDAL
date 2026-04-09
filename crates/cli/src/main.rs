@@ -183,6 +183,60 @@ enum Commands {
     /// Custom templates are stored globally in ~/.sdal/templates/.
     #[command(subcommand)]
     Template(TemplateCommands),
+
+    // ─── Networking ─────────────────────────────────────────────
+
+    /// Start the SDAL server to serve a repository over HTTP
+    ///
+    /// Launches a stateless HTTP server that handles push/fetch requests.
+    /// The server authenticates, authorizes, streams, and stores — nothing more.
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "7272")]
+        port: u16,
+    },
+
+    /// Push local commits to a remote repository
+    ///
+    /// Sends all local objects (commits, trees, blobs, chunks) for the
+    /// current branch to the remote server.
+    Push {
+        /// Remote name (e.g., 'origin')
+        remote: String,
+        /// Branch name (defaults to current branch)
+        branch: Option<String>,
+    },
+
+    /// Fetch objects from a remote repository
+    ///
+    /// Downloads missing objects from the remote without updating
+    /// the working directory.
+    Fetch {
+        /// Remote name (e.g., 'origin')
+        remote: String,
+    },
+
+    /// Pull changes from a remote (fetch + update working directory)
+    ///
+    /// Fetches from remote and checks out the latest HEAD.
+    Pull {
+        /// Remote name (e.g., 'origin')
+        remote: String,
+    },
+
+    /// Clone a remote SDAL repository
+    ///
+    /// Creates a new local repository and fetches all objects from the remote.
+    Clone {
+        /// Remote URL (e.g., http://127.0.0.1:7272)
+        url: String,
+    },
+
+    /// Manage remote repositories
+    ///
+    /// Add, remove, or list remote repository URLs.
+    #[command(subcommand)]
+    Remote(RemoteCommands),
 }
 
 #[derive(Subcommand)]
@@ -241,7 +295,30 @@ enum TemplateCommands {
     },
 }
 
-fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum RemoteCommands {
+    /// Add a new remote
+    ///
+    /// Associates a name with a remote URL (stored in .sdal/config)
+    Add {
+        /// Remote name (e.g., 'origin')
+        name: String,
+        /// Remote URL (e.g., http://127.0.0.1:7272)
+        url: String,
+    },
+
+    /// Remove a remote
+    Remove {
+        /// Remote name to remove
+        name: String,
+    },
+
+    /// List all configured remotes
+    List,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     let current_dir = std::env::current_dir()?;
     let sdal_root = current_dir.join(".sdal");
@@ -1246,9 +1323,227 @@ fn main() -> Result<()> {
             println!("Undone to checkpoint {} — \"{}\"", id, msg);
             println!("Tip: your other checkpoints are still saved. Use 'sdal checkpoint list' to see them.");
         }
+        // ─── Networking commands ────────────────────────────────────
+        Commands::Serve { port } => {
+            let addr = format!("0.0.0.0:{}", port);
+            sdal_network::server::start_server(current_dir.clone(), &addr).await?;
+        }
+        Commands::Push { remote, branch } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+
+            let remote_url = load_remote_url(&sdal_root, &remote)?;
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+
+            let branch_name = match branch {
+                Some(b) => b,
+                None => refs
+                    .get_current_branch()?
+                    .ok_or_else(|| anyhow::anyhow!("Not on a branch (detached HEAD)"))?,
+            };
+
+            println!("Pushing to {} ({}) branch '{}'...", remote, remote_url, branch_name);
+
+            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
+            sdal_network::client::push(&transport, &storage, &sdal_root, &branch_name)?;
+        }
+        Commands::Fetch { remote } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+
+            let remote_url = load_remote_url(&sdal_root, &remote)?;
+            let storage = FilesystemStorage::new(&sdal_root)?;
+
+            println!("Fetching from {} ({})...", remote, remote_url);
+
+            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
+            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+
+            let want: Vec<String> = refs_response.refs.values().cloned().collect();
+            if want.is_empty() {
+                println!("  Remote has no commits.");
+                return Ok(());
+            }
+
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root)?;
+
+            // Update remote-tracking refs
+            let refs = Refs::new(&sdal_root);
+            for (ref_name, hash) in &refs_response.refs {
+                if let Some(branch) = ref_name.strip_prefix("refs/heads/") {
+                    let remote_ref = format!("refs/remotes/{}/{}", remote, branch);
+                    refs.update_ref(&remote_ref, hash)?;
+                }
+            }
+
+            println!("  ✓ Fetch complete");
+        }
+        Commands::Pull { remote } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+
+            let remote_url = load_remote_url(&sdal_root, &remote)?;
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+
+            println!("Pulling from {} ({})...", remote, remote_url);
+
+            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
+            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+
+            let current_branch = refs
+                .get_current_branch()?
+                .ok_or_else(|| anyhow::anyhow!("Not on a branch"))?;
+
+            let remote_ref = format!("refs/heads/{}", current_branch);
+            let remote_head = refs_response
+                .refs
+                .get(&remote_ref)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Branch '{}' not found on remote", current_branch)
+                })?;
+
+            sdal_network::client::fetch(
+                &transport,
+                &storage,
+                vec![remote_head.clone()],
+                &sdal_root,
+            )?;
+
+            let local_ref = format!("refs/heads/{}", current_branch);
+            refs.update_ref(&local_ref, remote_head)?;
+
+            let ignore = Ignore::load(&current_dir);
+            // Load commit → get tree hash → restore tree
+            let commit_data = storage.get(remote_head)?;
+            if let Ok(sdal_core::Object::Commit(commit)) = sdal_core::Object::from_bytes(&commit_data) {
+                sdal_core::checkout::restore_tree_clean(&commit.tree, &storage, &current_dir, &ignore)?;
+            }
+
+            println!("  ✓ Pull complete — updated '{}' to {}", current_branch, &remote_head[..7]);
+        }
+        Commands::Clone { url } => {
+            if sdal_root.exists() {
+                anyhow::bail!("Directory already contains an SDAL repository");
+            }
+
+            println!("Cloning from {}...", url);
+
+            fs::create_dir(&sdal_root)?;
+            FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+            refs.create_branch("main", "")?;
+            refs.update_head("ref: refs/heads/main")?;
+
+            save_remote_url(&sdal_root, "origin", &url)?;
+
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let transport = sdal_network::transport::HttpTransport::new(&url);
+            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+
+            let want: Vec<String> = refs_response.refs.values().cloned().collect();
+            if want.is_empty() {
+                println!("  Remote repository is empty.");
+                return Ok(());
+            }
+
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root)?;
+
+            for (ref_name, hash) in &refs_response.refs {
+                refs.update_ref(ref_name, hash)?;
+            }
+
+            if let Some(head_hash) = &refs_response.head {
+                let ignore = Ignore::load(&current_dir);
+                let commit_data = storage.get(head_hash)?;
+                if let Ok(sdal_core::Object::Commit(commit)) = sdal_core::Object::from_bytes(&commit_data) {
+                    sdal_core::checkout::restore_tree_clean(&commit.tree, &storage, &current_dir, &ignore)?;
+                }
+                println!("  ✓ Cloned and checked out HEAD ({})", &head_hash[..7]);
+            } else {
+                println!("  ✓ Cloned (empty repository)");
+            }
+        }
+        Commands::Remote(cmd) => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+
+            match cmd {
+                RemoteCommands::Add { name, url } => {
+                    save_remote_url(&sdal_root, &name, &url)?;
+                    println!("  ✓ Added remote '{}' → {}", name, url);
+                }
+                RemoteCommands::Remove { name } => {
+                    remove_remote(&sdal_root, &name)?;
+                    println!("  ✓ Removed remote '{}'", name);
+                }
+                RemoteCommands::List => {
+                    let config = load_config(&sdal_root)?;
+                    if config.remotes.is_empty() {
+                        println!("  No remotes configured.");
+                        println!("  Use 'sdal remote add <name> <url>' to add one.");
+                    } else {
+                        for (name, url) in &config.remotes {
+                            println!("  {}  →  {}", name, url);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// SDAL repository config (stored as .sdal/config as JSON)
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SdalConfig {
+    #[serde(default)]
+    remotes: std::collections::HashMap<String, String>,
+}
+
+fn load_config(sdal_root: &Path) -> Result<SdalConfig> {
+    let config_path = sdal_root.join("config");
+    if !config_path.exists() {
+        return Ok(SdalConfig::default());
+    }
+    let content = fs::read_to_string(config_path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn save_config(sdal_root: &Path, config: &SdalConfig) -> Result<()> {
+    let config_path = sdal_root.join("config");
+    let content = serde_json::to_string_pretty(config)?;
+    fs::write(config_path, content)?;
+    Ok(())
+}
+
+fn load_remote_url(sdal_root: &Path, name: &str) -> Result<String> {
+    let config = load_config(sdal_root)?;
+    config
+        .remotes
+        .get(name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Remote '{}' not found. Use 'sdal remote add {} <url>'", name, name))
+}
+
+fn save_remote_url(sdal_root: &Path, name: &str, url: &str) -> Result<()> {
+    let mut config = load_config(sdal_root)?;
+    config.remotes.insert(name.to_string(), url.to_string());
+    save_config(sdal_root, &config)
+}
+
+fn remove_remote(sdal_root: &Path, name: &str) -> Result<()> {
+    let mut config = load_config(sdal_root)?;
+    if config.remotes.remove(name).is_none() {
+        anyhow::bail!("Remote '{}' not found", name);
+    }
+    save_config(sdal_root, &config)
 }
 
 /// Recursively collect files from a directory

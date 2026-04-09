@@ -13,10 +13,13 @@ sdal-storage = { path = "../storage" }
 sdal-chunking = { path = "../chunking" }
 sdal-checkpoint = { path = "../checkpoint" }
 sdal-tui = { path = "../tui" }
-# sdal-policy = { path = "../policy" } # Not used in Phase 1
+sdal-network = { path = "../network" }
+sdal-policy = { path = "../policy" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+tokio = { workspace = true }
 

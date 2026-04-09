@@ -1,0 +1,25 @@
+[package]
+name = "sdal-network"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sdal-core = { path = "../core" }
+sdal-storage = { path = "../storage" }
+sdal-policy = { path = "../policy" }
+sdal-chunking = { path = "../chunking" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+base64 = "0.22"
