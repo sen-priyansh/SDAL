@@ -307,6 +307,8 @@ pub fn perform_merge(
     repo_root: &Path,
     storage: &FilesystemStorage,
 ) -> Result<MergeState> {
+    // Reject traversing branch names before joining them to a filesystem path.
+    crate::refs::validate_branch_name(target_branch)?;
     let branch_ref = format!("refs/heads/{}", target_branch);
     let branch_path = repo_root.join(&branch_ref);
 
