@@ -149,7 +149,17 @@ fn remove_unexpected_files(
             continue;
         }
 
-        if path.is_dir() {
+        // Use lstat (no symlink following) so a clean checkout never traverses
+        // into, or deletes through, a symlink whose target may live outside the
+        // repository.
+        let ftype = fs::symlink_metadata(&path)?.file_type();
+
+        if ftype.is_symlink() {
+            // An untracked symlink: remove the link itself, never its target.
+            if !expected_paths.contains(&rel_path) {
+                fs::remove_file(&path)?;
+            }
+        } else if ftype.is_dir() {
             remove_unexpected_files(root_dir, &path, expected_paths, ignore)?;
 
             if !expected_paths.contains(&rel_path) {
@@ -159,7 +169,7 @@ fn remove_unexpected_files(
                     }
                 }
             }
-        } else if path.is_file() {
+        } else if ftype.is_file() {
             if !expected_paths.contains(&rel_path) {
                 fs::remove_file(&path)?;
             }
@@ -203,4 +213,37 @@ pub fn restore_blob(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn clean_checkout_does_not_delete_through_symlink_outside_repo() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("sdal_co_{}_{}", std::process::id(), nanos));
+        let external = base.join("external");
+        let work = base.join("work");
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        let keep = external.join("keep.txt");
+        fs::write(&keep, b"precious external data").unwrap();
+        // an untracked symlink inside the working tree pointing OUTSIDE the repo
+        symlink(&external, work.join("link")).unwrap();
+
+        let expected: HashSet<String> = HashSet::new();
+        let ignore = crate::ignore::Ignore::load(&work);
+        let _ = remove_unexpected_files(&work, &work, &expected, &ignore);
+
+        assert!(
+            keep.exists(),
+            "clean checkout must not delete files through a symlink that points outside the repo"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 }
