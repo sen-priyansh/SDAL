@@ -188,28 +188,42 @@ pub fn find_merge_base(
     anyhow::bail!("No common ancestor found")
 }
 
-/// Convert tree to flat map of paths -> hashes
+/// Convert a tree to a flat map of full file paths -> blob hashes, recursing
+/// into every subdirectory (e.g. "dir/sub/file.txt").
 fn flatten_tree(tree_hash: &str, storage: &FilesystemStorage) -> Result<HashMap<String, String>> {
     let mut result = HashMap::new();
+    flatten_tree_into(tree_hash, storage, "", &mut result)?;
+    Ok(result)
+}
 
+fn flatten_tree_into(
+    tree_hash: &str,
+    storage: &FilesystemStorage,
+    prefix: &str,
+    out: &mut HashMap<String, String>,
+) -> Result<()> {
     let tree_data = storage.get(tree_hash)?;
     let obj = Object::from_bytes(&tree_data).map_err(anyhow::Error::msg)?;
 
     if let Object::Tree(tree) = obj {
         for (name, entry) in tree.entries {
+            let full = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", prefix, name)
+            };
             match entry {
                 TreeEntry::Blob { hash, .. } => {
-                    result.insert(name, hash);
+                    out.insert(full, hash);
                 }
-                TreeEntry::Tree { .. } => {
-                    // For now, treat nested trees as single entries
-                    // Full implementation would recursively flatten
+                TreeEntry::Tree { hash } => {
+                    flatten_tree_into(&hash, storage, &full, out)?;
                 }
             }
         }
     }
 
-    Ok(result)
+    Ok(())
 }
 
 /// Populate index from a tree (recursively)
@@ -244,14 +258,67 @@ pub fn populate_index_from_tree(
     Ok(())
 }
 
-/// Perform 3-way merge on trees
-/// Returns (merged_tree, conflicts, conflict_details)
+/// Build a hierarchical tree from a flat `path -> blob_hash` map, writing every
+/// (sub)tree object to storage. Returns the root tree hash. Paths use '/' as the
+/// separator (e.g. "dir/sub/file.txt"); each component becomes a nested Tree.
+fn build_merged_tree(
+    entries: &HashMap<String, String>,
+    storage: &FilesystemStorage,
+) -> Result<String> {
+    let mut files_here: Vec<(String, String)> = Vec::new();
+    let mut subdirs: HashMap<String, HashMap<String, String>> = HashMap::new();
+
+    for (path, hash) in entries {
+        match path.split_once('/') {
+            Some((dir, rest)) => {
+                subdirs
+                    .entry(dir.to_string())
+                    .or_default()
+                    .insert(rest.to_string(), hash.clone());
+            }
+            None => files_here.push((path.clone(), hash.clone())),
+        }
+    }
+
+    let mut tree = Tree::new();
+    for (name, hash) in files_here {
+        tree.entries.push((name, TreeEntry::Blob { hash, size: 0 }));
+    }
+    for (dir, sub) in subdirs {
+        let subtree_hash = build_merged_tree(&sub, storage)?;
+        tree.entries
+            .push((dir, TreeEntry::Tree { hash: subtree_hash }));
+    }
+
+    tree.sort();
+    tree.validate()
+        .map_err(|e| anyhow::anyhow!("Merged tree validation failed: {}", e))?;
+
+    let mut bytes = Vec::new();
+    tree.write_binary(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize merged tree: {}", e))?;
+
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &bytes);
+    let hash = hex::encode(sha2::Digest::finalize(hasher));
+
+    if let Err(e) = storage.put(&hash, &bytes) {
+        if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
+            return Err(e.into());
+        }
+    }
+
+    Ok(hash)
+}
+
+/// Perform 3-way merge on trees (recursively, across subdirectories).
+/// Returns (merged_files: path -> blob_hash, conflicts, conflict_details).
 pub fn merge_trees(
     base_tree_hash: &str,
     ours_tree_hash: &str,
     theirs_tree_hash: &str,
     storage: &FilesystemStorage,
-) -> Result<(Tree, Vec<String>, HashMap<String, (String, String)>)> {
+) -> Result<(HashMap<String, String>, Vec<String>, HashMap<String, (String, String)>)> {
     let base_files = flatten_tree(base_tree_hash, storage)?;
     let ours_files = flatten_tree(ours_tree_hash, storage)?;
     let theirs_files = flatten_tree(theirs_tree_hash, storage)?;
@@ -261,7 +328,7 @@ pub fn merge_trees(
     all_paths.extend(ours_files.keys().cloned());
     all_paths.extend(theirs_files.keys().cloned());
 
-    let mut merged_tree = Tree::new();
+    let mut merged_files: HashMap<String, String> = HashMap::new();
     let mut conflicts = Vec::new();
     let mut conflict_details: HashMap<String, (String, String)> = HashMap::new();
 
@@ -287,17 +354,11 @@ pub fn merge_trees(
         };
 
         if let Some(hash) = result_hash {
-            merged_tree.add_entry(
-                path.clone(),
-                TreeEntry::Blob {
-                    hash,
-                    size: 0, // Size tracking can be added later
-                },
-            );
+            merged_files.insert(path.clone(), hash);
         }
     }
 
-    Ok((merged_tree, conflicts, conflict_details))
+    Ok((merged_files, conflicts, conflict_details))
 }
 
 /// Perform merge operation
@@ -324,35 +385,16 @@ pub fn perform_merge(
     let ours_commit = load_commit(ours_hash, storage)?;
     let theirs_commit = load_commit(&theirs_hash, storage)?;
 
-    // Merge trees
-    let (mut merged_tree, conflicts, conflict_details) = merge_trees(
+    // 3-way merge across all subdirectories, then rebuild a hierarchical tree
+    // (and all subtree objects) from the merged file set.
+    let (merged_files, conflicts, conflict_details) = merge_trees(
         &base_commit.tree,
         &ours_commit.tree,
         &theirs_commit.tree,
         storage,
     )?;
 
-    merged_tree.sort();
-    merged_tree
-        .validate()
-        .map_err(|e| anyhow::anyhow!("Merged tree validation failed: {}", e))?;
-
-    // Write binary tree
-    let mut tree_bytes = Vec::new();
-    merged_tree
-        .write_binary(&mut tree_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize merged tree: {}", e))?;
-
-    // Hash the ENTIRE serialized tree (including header), matching what storage.put() verifies
-    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-    sha2::Digest::update(&mut hasher, &tree_bytes);
-    let merged_tree_hash = hex::encode(sha2::Digest::finalize(hasher));
-
-    if let Err(e) = storage.put(&merged_tree_hash, &tree_bytes) {
-        if !matches!(e, sdal_storage::StorageError::AlreadyExists(_)) {
-            return Err(e.into());
-        }
-    }
+    let merged_tree_hash = build_merged_tree(&merged_files, storage)?;
 
     let merge_state = MergeState {
         ours: ours_hash.to_string(),
@@ -373,5 +415,72 @@ fn load_commit(hash: &str, storage: &FilesystemStorage) -> Result<Commit> {
         Ok(commit)
     } else {
         anyhow::bail!("Not a commit object")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_storage() -> FilesystemStorage {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("sdal_merge_{}_{}", std::process::id(), nanos))
+            .join(".sdal");
+        FilesystemStorage::new(&root).unwrap()
+    }
+
+    fn store_tree(tree: &mut Tree, storage: &FilesystemStorage) -> String {
+        tree.sort();
+        let mut bytes = Vec::new();
+        tree.write_binary(&mut bytes).unwrap();
+        let mut h = <sha2::Sha256 as sha2::Digest>::new();
+        sha2::Digest::update(&mut h, &bytes);
+        let hash = hex::encode(sha2::Digest::finalize(h));
+        let _ = storage.put(&hash, &bytes);
+        hash
+    }
+
+    #[test]
+    fn flatten_tree_recurses_into_subdirs() {
+        let st = tmp_storage();
+        let blob = "aa".repeat(32);
+        let mut inner = Tree::new();
+        inner
+            .entries
+            .push(("file.txt".into(), TreeEntry::Blob { hash: blob.clone(), size: 0 }));
+        let inner_hash = store_tree(&mut inner, &st);
+        let mut root = Tree::new();
+        root.entries
+            .push(("dir".into(), TreeEntry::Tree { hash: inner_hash }));
+        let root_hash = store_tree(&mut root, &st);
+
+        let flat = flatten_tree(&root_hash, &st).unwrap();
+        assert_eq!(
+            flat.get("dir/file.txt"),
+            Some(&blob),
+            "files inside subdirectories must be flattened with their full path"
+        );
+    }
+
+    #[test]
+    fn build_merged_tree_preserves_subdirs() {
+        let st = tmp_storage();
+        let mut entries = HashMap::new();
+        entries.insert("a.txt".to_string(), "11".repeat(32));
+        entries.insert("dir/b.txt".to_string(), "22".repeat(32));
+        entries.insert("dir/sub/c.txt".to_string(), "33".repeat(32));
+
+        let root = build_merged_tree(&entries, &st).unwrap();
+
+        // Round-trip: flattening the rebuilt tree must reproduce every path.
+        let flat = flatten_tree(&root, &st).unwrap();
+        assert_eq!(flat.len(), 3, "all files must survive the hierarchical rebuild");
+        assert_eq!(flat.get("a.txt"), Some(&"11".repeat(32)));
+        assert_eq!(flat.get("dir/b.txt"), Some(&"22".repeat(32)));
+        assert_eq!(flat.get("dir/sub/c.txt"), Some(&"33".repeat(32)));
     }
 }
