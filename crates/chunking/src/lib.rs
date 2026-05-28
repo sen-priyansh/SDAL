@@ -4,8 +4,8 @@ pub mod fastcdc;
 pub mod streamchunker;
 
 pub use fastcdc::FastCDC;
-pub use streamchunker::stream_chunk;
-//importing the stream chunker.
+pub use streamchunker::stream_chunk_cdc;
+//importing the streaming content-defined chunker.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
