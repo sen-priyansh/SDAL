@@ -17,7 +17,7 @@ fn is_valid_hash(s: &str) -> bool {
 }
 
 /// Validate branch name to prevent directory traversal and invalid characters
-fn validate_branch_name(name: &str) -> Result<()> {
+pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!("Branch name cannot be empty");
     }
@@ -29,6 +29,28 @@ fn validate_branch_name(name: &str) -> Result<()> {
     }
     if name.starts_with('.') {
         anyhow::bail!("Branch name cannot start with '.'");
+    }
+    Ok(())
+}
+
+/// Validate a ref *path* (e.g. "refs/heads/main"). Unlike a branch name it may
+/// contain '/', but must not be absolute, contain a "." / ".." component, or a
+/// NUL — otherwise a crafted HEAD symref or ref name could escape the repo when
+/// joined to `repo_root`.
+fn validate_ref_path(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Ref name cannot be empty");
+    }
+    if name.starts_with('/') || name.starts_with('\\') {
+        anyhow::bail!("Ref name cannot be absolute: {}", name);
+    }
+    if name.contains('\0') {
+        anyhow::bail!("Ref name cannot contain NUL: {:?}", name);
+    }
+    for comp in name.split(['/', '\\']) {
+        if comp == "." || comp == ".." {
+            anyhow::bail!("Ref name cannot contain traversal components: {}", name);
+        }
     }
     Ok(())
 }
@@ -75,6 +97,7 @@ impl Refs {
     }
 
     pub fn read_ref(&self, name: &str) -> Result<Option<String>> {
+        validate_ref_path(name)?;
         let ref_path = self.repo_root.join(name);
         if !ref_path.exists() {
             return Ok(None);
@@ -94,6 +117,7 @@ impl Refs {
     }
 
     pub fn update_ref(&self, name: &str, commit_hash: &str) -> Result<()> {
+        validate_ref_path(name)?;
         if !commit_hash.is_empty() && !is_valid_hash(commit_hash) {
             anyhow::bail!("Invalid commit hash: {}", commit_hash);
         }
@@ -201,5 +225,55 @@ impl Refs {
         fs::write(head_path, new_head_content)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_repo() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo = std::env::temp_dir()
+            .join(format!("sdal_refs_{}_{}", std::process::id(), nanos))
+            .join("repo");
+        fs::create_dir_all(repo.join("refs/heads")).unwrap();
+        repo
+    }
+
+    #[test]
+    fn update_ref_rejects_traversal() {
+        let repo = tmp_repo();
+        let refs = Refs::new(&repo);
+        let h = "ab".repeat(32);
+        assert!(
+            refs.update_ref("../escape", &h).is_err(),
+            "update_ref must reject a traversing ref name"
+        );
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn read_ref_rejects_traversal() {
+        let repo = tmp_repo();
+        let refs = Refs::new(&repo);
+        assert!(
+            refs.read_ref("../../escape").is_err(),
+            "read_ref must reject a traversing ref name"
+        );
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn normal_ref_roundtrips() {
+        let repo = tmp_repo();
+        let refs = Refs::new(&repo);
+        let h = "cd".repeat(32);
+        refs.update_ref("refs/heads/main", &h).unwrap();
+        assert_eq!(refs.read_ref("refs/heads/main").unwrap(), Some(h));
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
     }
 }
