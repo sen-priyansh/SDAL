@@ -114,6 +114,7 @@ mod tests {
         // Test that FastCDC can handle and chunk large files.
         // Content-defined chunking needs *content variation* to find cut points;
         // a block of identical bytes (all zeros) has none and collapses to a
+        // a block of identical bytes (e.g. all zeros) has none and collapses to a
         // single chunk, so use deterministic pseudo-random data (xorshift64).
         let mut data = Vec::with_capacity(200 * 1024);
         let mut x: u64 = 0x9E37_79B9_7F4A_7C15;

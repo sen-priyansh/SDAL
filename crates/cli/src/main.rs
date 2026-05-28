@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sdal_chunking::{Chunker, FastCDC};
+use sdal_chunking::stream_chunk_cdc;
 use sdal_core::{
     Blob, ChunkEntry, Commit, Object, Tree, TreeEntry, checkout, ignore::Ignore, index::Index,
     refs::Refs,
@@ -10,6 +10,41 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+/// Stream a file through FastCDC with bounded (~1 MB) memory, regardless of file
+/// size. Each chunk is produced, optionally written to the content-addressed
+/// store, then dropped before the next is read — so a multi-GB asset is never
+/// fully resident in RAM. (The previous `fs::read` + in-memory chunk path held
+/// ~2x the file size.) Returns the chunk entries and total file size.
+fn chunk_file_streaming(
+    path: &Path,
+    storage: Option<&FilesystemStorage>,
+) -> Result<(Vec<ChunkEntry>, u64)> {
+    let file = fs::File::open(path)?;
+    let reader = io::BufReader::new(file);
+
+    let mut chunk_entries = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for chunk in stream_chunk_cdc(reader) {
+        let chunk = chunk?;
+        total_size += chunk.data.len() as u64;
+
+        if let Some(store) = storage {
+            // AlreadyExists is the deduplication happy-path, not an error.
+            match store.put(&chunk.hash, &chunk.data) {
+                Ok(_) => {}
+                Err(sdal_storage::StorageError::AlreadyExists(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        chunk_entries.push(ChunkEntry::from(&chunk));
+        // `chunk` and its data buffer are dropped here, keeping memory bounded.
+    }
+
+    Ok((chunk_entries, total_size))
+}
 
 const BANNER: &str = r#"
   ███████╗██████╗  █████╗ ██╗     
@@ -363,24 +398,7 @@ fn main() -> Result<()> {
             }
 
             for (path, rel_path) in files_to_add {
-                let file_data = std::fs::read(&path)?;
-                let total_size = file_data.len() as u64;
-
-                let chunker = FastCDC::new();
-                let chunks = chunker.chunk(&file_data)?;
-
-                let mut chunk_entries = Vec::new();
-                for chunk in chunks {
-                    // Ignore AlreadyExists - chunk deduplication is working
-                    match storage.put(&chunk.hash, &chunk.data) {
-                        Ok(_) => {}
-                        Err(sdal_storage::StorageError::AlreadyExists(_)) => {
-                            // Chunk already exists, this is fine (deduplication)
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                    chunk_entries.push(ChunkEntry::from(&chunk));
-                }
+                let (chunk_entries, total_size) = chunk_file_streaming(&path, Some(&storage))?;
 
                 let blob = Blob {
                     chunks: chunk_entries,
@@ -612,18 +630,11 @@ fn main() -> Result<()> {
                 if index.is_staged(&rel_path) {
                     // Check if staged file has been modified since staging
                     if let Some(index_hash) = index.entries.get(rel_path) {
-                        let file_data = std::fs::read(path)?;
-                        let chunker = FastCDC::new();
-                        let chunks = chunker.chunk(&file_data)?;
-
-                        let mut chunk_entries = Vec::new();
-                        for chunk in chunks {
-                            chunk_entries.push(ChunkEntry::from(&chunk));
-                        }
+                        let (chunk_entries, total_size) = chunk_file_streaming(path, None)?;
 
                         let blob = Blob {
                             chunks: chunk_entries,
-                            total_size: file_data.len() as u64,
+                            total_size,
                         };
 
                         let blob_object = Object::Blob(blob);
@@ -644,18 +655,11 @@ fn main() -> Result<()> {
                     }
                 } else if let Some(head_hash) = head_files.get(rel_path) {
                     // File exists in HEAD - check if actually modified
-                    let file_data = std::fs::read(path)?;
-                    let chunker = FastCDC::new();
-                    let chunks = chunker.chunk(&file_data)?;
-
-                    let mut chunk_entries = Vec::new();
-                    for chunk in chunks {
-                        chunk_entries.push(ChunkEntry::from(&chunk));
-                    }
+                    let (chunk_entries, total_size) = chunk_file_streaming(path, None)?;
 
                     let blob = Blob {
                         chunks: chunk_entries,
-                        total_size: file_data.len() as u64,
+                        total_size,
                     };
 
                     let blob_object = Object::Blob(blob);
@@ -1118,21 +1122,7 @@ fn main() -> Result<()> {
 
             let mut staged_count = 0usize;
             for (path, rel_path) in files_to_add {
-                let file_data = std::fs::read(&path)?;
-                let total_size = file_data.len() as u64;
-
-                let chunker = sdal_chunking::FastCDC::new();
-                let chunks = chunker.chunk(&file_data)?;
-
-                let mut chunk_entries = Vec::new();
-                for chunk in chunks {
-                    match storage.put(&chunk.hash, &chunk.data) {
-                        Ok(_) => {}
-                        Err(sdal_storage::StorageError::AlreadyExists(_)) => {}
-                        Err(e) => return Err(e.into()),
-                    }
-                    chunk_entries.push(ChunkEntry::from(&chunk));
-                }
+                let (chunk_entries, total_size) = chunk_file_streaming(&path, Some(&storage))?;
 
                 let blob = Blob {
                     chunks: chunk_entries,

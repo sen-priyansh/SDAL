@@ -122,9 +122,18 @@ impl Tree {
                 return Err(format!("Duplicate entry name: {}", name));
             }
 
-            // Invariant 2: Names must not contain path separators
-            if name.contains('/') || name.contains('\\') {
-                return Err(format!("Tree entry name contains path separator: {}", name));
+            // Invariant 2: Names must be safe single path components.
+            // Reject path separators, the "." / ".." traversal names, empty
+            // names, and embedded NULs so a crafted/corrupt tree cannot escape
+            // the working directory during checkout (zip-slip).
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains('/')
+                || name.contains('\\')
+                || name.contains('\0')
+            {
+                return Err(format!("Unsafe tree entry name: {:?}", name));
             }
         }
 
@@ -293,7 +302,10 @@ impl Tree {
             ));
         }
 
-        let mut entries = Vec::with_capacity(entry_count);
+        // Do not size the allocation from the untrusted count: a 12-byte header
+        // claiming ~1M entries would otherwise force a large up-front allocation
+        // before any entry bytes are read. Grow as entries are actually parsed.
+        let mut entries = Vec::with_capacity(entry_count.min(4096));
 
         for _ in 0..entry_count {
             let t = br.read_u8()?;
@@ -459,5 +471,59 @@ mod tests {
         } else {
             panic!("Expected tree");
         }
+    }
+
+    fn craft_tree_bytes(entries: &[(u8, &str, [u8; 32])]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for (t, name, hash) in entries {
+            payload.push(*t);
+            payload.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            payload.extend_from_slice(name.as_bytes());
+            payload.extend_from_slice(hash);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(TREE_MAGIC);
+        out.push(TREE_VERSION);
+        out.push(0); // flags
+        out.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    #[test]
+    fn validate_rejects_parent_dir_name() {
+        let mut tree = Tree::new();
+        // bypass add_entry (which only guards separators) to test validate directly
+        tree.entries.push((
+            "..".to_string(),
+            TreeEntry::Blob { hash: "ab".repeat(32), size: 0 },
+        ));
+        assert!(
+            tree.validate().is_err(),
+            "tree entry named '..' must be rejected (path traversal)"
+        );
+    }
+
+    #[test]
+    fn read_binary_rejects_traversal_name() {
+        // a crafted/hostile tree object whose entry name is ".." must not parse
+        let bytes = craft_tree_bytes(&[(0u8, "..", [7u8; 32])]);
+        assert!(
+            Tree::read_binary(&bytes[..]).is_err(),
+            "tree object with a '..' entry must be rejected on read"
+        );
+    }
+
+    #[test]
+    fn read_binary_huge_count_truncated_errors_cleanly() {
+        // header claims 900k entries but the body is empty: must error, not panic/hang/OOM
+        let mut out = Vec::new();
+        out.extend_from_slice(TREE_MAGIC);
+        out.push(TREE_VERSION);
+        out.push(0);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&900_000u32.to_le_bytes());
+        assert!(Tree::read_binary(&out[..]).is_err());
     }
 }
