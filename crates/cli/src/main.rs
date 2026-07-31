@@ -221,16 +221,6 @@ enum Commands {
 
     // ─── Networking ─────────────────────────────────────────────
 
-    /// Start the SDAL server to serve a repository over HTTP
-    ///
-    /// Launches a stateless HTTP server that handles push/fetch requests.
-    /// The server authenticates, authorizes, streams, and stores — nothing more.
-    Serve {
-        /// Port to listen on
-        #[arg(short, long, default_value = "7272")]
-        port: u16,
-    },
-
     /// Push local commits to a remote repository
     ///
     /// Sends all local objects (commits, trees, blobs, chunks) for the
@@ -370,6 +360,12 @@ async fn main() -> Result<()> {
             let refs = Refs::new(&sdal_root);
             refs.create_branch("main", "")?;
             refs.update_head("ref: refs/heads/main")?;
+
+            // Generate Ed25519 identity keypair (global, ~/.sdal/identity/)
+            let identity_dir = sdal_network::identity::global_identity_dir()?;
+            let signing_key = sdal_network::identity::load_or_create_identity(&identity_dir)?;
+            let pub_hex = sdal_network::identity::public_key_hex(&signing_key);
+            println!("  ✓ Identity ready ({}…)", &pub_hex[..12]);
 
             // Write .sdalignore — empty by default, or pre-filled from template
             let sdalignore_path = current_dir.join(".sdalignore");
@@ -1314,10 +1310,7 @@ async fn main() -> Result<()> {
             println!("Tip: your other checkpoints are still saved. Use 'sdal checkpoint list' to see them.");
         }
         // ─── Networking commands ────────────────────────────────────
-        Commands::Serve { port } => {
-            let addr = format!("0.0.0.0:{}", port);
-            sdal_network::server::start_server(current_dir.clone(), &addr).await?;
-        }
+
         Commands::Push { remote, branch } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
@@ -1326,6 +1319,7 @@ async fn main() -> Result<()> {
             let remote_url = load_remote_url(&sdal_root, &remote)?;
             let storage = FilesystemStorage::new(&sdal_root)?;
             let refs = Refs::new(&sdal_root);
+            let signing_key = sdal_network::identity::load_global_identity()?;
 
             let branch_name = match branch {
                 Some(b) => b,
@@ -1337,7 +1331,7 @@ async fn main() -> Result<()> {
             println!("Pushing to {} ({}) branch '{}'...", remote, remote_url, branch_name);
 
             let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            sdal_network::client::push(&transport, &storage, &sdal_root, &branch_name)?;
+            sdal_network::client::push(&transport, &storage, &sdal_root, &branch_name, &signing_key)?;
         }
         Commands::Fetch { remote } => {
             if !sdal_root.exists() {
@@ -1346,11 +1340,12 @@ async fn main() -> Result<()> {
 
             let remote_url = load_remote_url(&sdal_root, &remote)?;
             let storage = FilesystemStorage::new(&sdal_root)?;
+            let signing_key = sdal_network::identity::load_global_identity()?;
 
             println!("Fetching from {} ({})...", remote, remote_url);
 
             let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
 
             let want: Vec<String> = refs_response.refs.values().cloned().collect();
             if want.is_empty() {
@@ -1358,7 +1353,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root)?;
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key)?;
 
             // Update remote-tracking refs
             let refs = Refs::new(&sdal_root);
@@ -1379,11 +1374,12 @@ async fn main() -> Result<()> {
             let remote_url = load_remote_url(&sdal_root, &remote)?;
             let storage = FilesystemStorage::new(&sdal_root)?;
             let refs = Refs::new(&sdal_root);
+            let signing_key = sdal_network::identity::load_global_identity()?;
 
             println!("Pulling from {} ({})...", remote, remote_url);
 
             let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
 
             let current_branch = refs
                 .get_current_branch()?
@@ -1402,6 +1398,7 @@ async fn main() -> Result<()> {
                 &storage,
                 vec![remote_head.clone()],
                 &sdal_root,
+                &signing_key,
             )?;
 
             let local_ref = format!("refs/heads/{}", current_branch);
@@ -1423,6 +1420,9 @@ async fn main() -> Result<()> {
 
             println!("Cloning from {}...", url);
 
+            // Ensure identity exists (global ~/.sdal/identity/) — needed before any network call
+            let signing_key = sdal_network::identity::load_global_identity()?;
+
             fs::create_dir(&sdal_root)?;
             FilesystemStorage::new(&sdal_root)?;
             let refs = Refs::new(&sdal_root);
@@ -1433,7 +1433,7 @@ async fn main() -> Result<()> {
 
             let storage = FilesystemStorage::new(&sdal_root)?;
             let transport = sdal_network::transport::HttpTransport::new(&url);
-            let refs_response = sdal_network::client::fetch_refs(&transport)?;
+            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
 
             let want: Vec<String> = refs_response.refs.values().cloned().collect();
             if want.is_empty() {
@@ -1441,7 +1441,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root)?;
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key)?;
 
             for (ref_name, hash) in &refs_response.refs {
                 refs.update_ref(ref_name, hash)?;

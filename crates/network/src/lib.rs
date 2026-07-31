@@ -9,6 +9,5 @@
 pub mod transport;
 pub mod protocol;
 pub mod client;
-pub mod server;
 pub mod identity;
 pub mod wire;

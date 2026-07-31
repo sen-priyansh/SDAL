@@ -16,7 +16,10 @@ use ed25519_dalek::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+// Re-export so consumers (CLI) don't need ed25519-dalek directly
+pub use ed25519_dalek::SigningKey as IdentitySigningKey;
 
 /// A signed request envelope wrapping arbitrary payload bytes.
 ///
@@ -56,7 +59,14 @@ pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
 ///   <dir>/public.key   (32 bytes, hex-encoded)
 pub fn save_keypair(dir: &Path, signing_bytes: &[u8], verifying_bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("private.key"), hex::encode(signing_bytes))?;
+    let private_path = dir.join("private.key");
+    std::fs::write(&private_path, hex::encode(signing_bytes))?;
+    // Best-effort: restrict private key to owner-only on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::write(dir.join("public.key"), hex::encode(verifying_bytes))?;
     Ok(())
 }
@@ -188,6 +198,38 @@ mod base64_serde {
             .decode(&s)
             .map_err(serde::de::Error::custom)
     }
+}
+
+/// Return the global SDAL identity directory: `~/.sdal/identity/`
+pub fn global_identity_dir() -> anyhow::Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("Cannot determine home directory ($HOME not set)"))?;
+    Ok(PathBuf::from(home).join(".sdal").join("identity"))
+}
+
+/// Load or create an Ed25519 identity keypair.
+///
+/// If the identity directory already contains keys, load them.
+/// Otherwise, generate a fresh keypair and save it.
+pub fn load_or_create_identity(identity_dir: &Path) -> anyhow::Result<SigningKey> {
+    if identity_dir.join("private.key").exists() {
+        load_signing_key(identity_dir)
+    } else {
+        let (sk_bytes, vk_bytes) = generate_keypair();
+        save_keypair(identity_dir, &sk_bytes, &vk_bytes)?;
+        load_signing_key(identity_dir)
+    }
+}
+
+/// Convenience: load the global identity, creating it if missing.
+pub fn load_global_identity() -> anyhow::Result<SigningKey> {
+    let dir = global_identity_dir()?;
+    load_or_create_identity(&dir)
+}
+
+/// Return the hex-encoded public key for a signing key.
+pub fn public_key_hex(signing_key: &SigningKey) -> String {
+    hex::encode(signing_key.verifying_key().to_bytes())
 }
 
 #[cfg(test)]

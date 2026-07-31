@@ -5,87 +5,186 @@
 // Translates high-level operations (push, fetch, clone) into
 // Transport calls. Does NOT contain HTTP logic directly — uses
 // the Transport trait abstraction.
+//
+// Phase 1: All outbound requests are wrapped in a SignedEnvelope
+// (Ed25519 signature + timestamp + nonce) for authentication.
 
+use crate::identity;
 use crate::protocol::{
-    FetchRequest, FetchResponse, PushRequest, PushResponse, RefsResponse, TransferObject,
+    ChunkRequest, ChunkResponse, MetadataRequest, MetadataResponse, PushRequest, PushResponse,
+    RefsResponse, TransferObject,
 };
 use crate::transport::Transport;
-use sdal_core::{Object};
+use ed25519_dalek::SigningKey;
+use sdal_core::Object;
 use sdal_storage::{FilesystemStorage, Storage};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 
+// ─── Helpers ────────────────────────────────────────────────────────
+
+/// Sign a payload and POST the envelope JSON to the given path.
+/// Returns the raw response bytes from the server.
+fn signed_post(
+    transport: &dyn Transport,
+    signing_key: &SigningKey,
+    path: &str,
+    payload: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let envelope = identity::sign_payload(signing_key, payload);
+    let envelope_json = serde_json::to_vec(&envelope)?;
+    transport.post(path, envelope_json)
+}
+
+// ─── Public API ─────────────────────────────────────────────────────
+
 /// Fetch remote refs (branch → commit hash mapping).
-pub fn fetch_refs(transport: &dyn Transport) -> anyhow::Result<RefsResponse> {
-    let data = transport.get("/refs")?;
-    let refs: RefsResponse = serde_json::from_slice(&data)?;
+///
+/// The empty-body request is still signed to prove identity.
+pub fn fetch_refs(
+    transport: &dyn Transport,
+    signing_key: &SigningKey,
+) -> anyhow::Result<RefsResponse> {
+    // Sign an empty payload — server verifies identity before returning refs
+    let response_bytes = signed_post(transport, signing_key, "/refs", b"")?;
+    let refs: RefsResponse = serde_json::from_slice(&response_bytes)?;
     Ok(refs)
 }
 
 /// Fetch objects from remote, storing them locally.
 ///
-/// 1. Query remote refs
-/// 2. Determine what local storage already has
-/// 3. Send FetchRequest with want/have
-/// 4. Receive and store missing objects
+/// 1. Phase 1: Request metadata (commits, trees, blobs)
+/// 2. Compute missing chunks locally
+/// 3. Phase 2: Request only missing chunks
 pub fn fetch(
     transport: &dyn Transport,
     storage: &FilesystemStorage,
     want: Vec<String>,
     _repo_root: &std::path::Path,
+    signing_key: &SigningKey,
 ) -> anyhow::Result<()> {
-    // Collect local chunk hashes for dedup negotiation
-    // For now, send an empty have list (full fetch)
-    // TODO: Phase 2 — walk local commits to build have_chunks
-    let have_chunks: Vec<String> = Vec::new();
+    // 1. Phase 1: Request metadata
+    let meta_req = MetadataRequest { want: want.clone() };
+    let meta_req_bytes = serde_json::to_vec(&meta_req)?;
 
-    let req = FetchRequest { want, have_chunks };
-    let req_bytes = serde_json::to_vec(&req)?;
+    println!("  Fetching metadata (Phase 1)...");
+    let meta_resp_bytes =
+        signed_post(transport, signing_key, "/metadata/discover", &meta_req_bytes)?;
+    let meta_resp: MetadataResponse = serde_json::from_slice(&meta_resp_bytes)?;
 
-    let response_bytes = transport.post("/fetch", req_bytes)?;
-    let response: FetchResponse = serde_json::from_slice(&response_bytes)?;
+    for obj in &meta_resp.objects {
+        verify_and_store(storage, obj)?;
+    }
 
-    // Store all received objects
-    for obj in &response.objects {
-        // Verify hash before storing (never trust remote)
-        let mut hasher = Sha256::new();
-        hasher.update(&obj.data);
-        let computed = hex::encode(hasher.finalize());
-        if computed != obj.hash {
-            anyhow::bail!(
-                "Hash mismatch from remote: expected {}, computed {}",
-                obj.hash,
-                computed
-            );
+    println!("  ✓ Received {} metadata objects", meta_resp.objects.len());
+
+    // 2. Client-side graph traversal to find missing chunks
+    let want_chunks = compute_missing_chunks(storage, &want)?;
+
+    if want_chunks.is_empty() {
+        println!("  ✓ All chunks already present locally. No chunk download needed.");
+        return Ok(());
+    }
+
+    // 3. Phase 2: Request missing chunks
+    println!("  Fetching {} missing chunks (Phase 2)...", want_chunks.len());
+    let chunk_req = ChunkRequest { want_chunks };
+    let chunk_req_bytes = serde_json::to_vec(&chunk_req)?;
+
+    let chunk_resp_bytes = signed_post(transport, signing_key, "/chunks/fetch", &chunk_req_bytes)?;
+    let chunk_resp: ChunkResponse = serde_json::from_slice(&chunk_resp_bytes)?;
+
+    for obj in &chunk_resp.chunks {
+        verify_and_store(storage, obj)?;
+    }
+
+    println!("  ✓ Received {} chunks", chunk_resp.chunks.len());
+
+    Ok(())
+}
+
+fn verify_and_store(storage: &FilesystemStorage, obj: &TransferObject) -> anyhow::Result<()> {
+    let mut hasher = Sha256::new();
+    hasher.update(&obj.data);
+    let computed = hex::encode(hasher.finalize());
+    if computed != obj.hash {
+        anyhow::bail!(
+            "Hash mismatch from remote: expected {}, computed {}",
+            obj.hash,
+            computed
+        );
+    }
+    match storage.put(&obj.hash, &obj.data) {
+        Ok(_) => Ok(()),
+        Err(sdal_storage::StorageError::AlreadyExists(_)) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn compute_missing_chunks(
+    storage: &FilesystemStorage,
+    wants: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut missing_chunks: HashSet<String> = HashSet::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+
+    for w in wants {
+        queue.push_back(w.clone());
+    }
+
+    while let Some(hash) = queue.pop_front() {
+        if visited.contains(&hash) || hash.is_empty() {
+            continue;
         }
+        visited.insert(hash.clone());
 
-        match storage.put(&obj.hash, &obj.data) {
-            Ok(_) => {}
-            Err(sdal_storage::StorageError::AlreadyExists(_)) => {
-                // Already have this object locally
+        let data = match storage.get(&hash) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if let Ok(obj) = Object::from_bytes(&data) {
+            match obj {
+                Object::Commit(commit) => {
+                    for parent in &commit.parents {
+                        queue.push_back(parent.clone());
+                    }
+                    queue.push_back(commit.tree.clone());
+                }
+                Object::Tree(tree) => {
+                    for (_, entry) in &tree.entries {
+                        match entry {
+                            sdal_core::TreeEntry::Blob { hash, .. } => queue.push_back(hash.clone()),
+                            sdal_core::TreeEntry::Tree { hash } => queue.push_back(hash.clone()),
+                        }
+                    }
+                }
+                Object::Blob(blob) => {
+                    for chunk in &blob.chunks {
+                        if !storage.exists(&chunk.hash) {
+                            missing_chunks.insert(chunk.hash.clone());
+                        }
+                    }
+                }
             }
-            Err(e) => return Err(e.into()),
         }
     }
 
-    println!(
-        "  ✓ Received {} objects from remote",
-        response.objects.len()
-    );
-
-    Ok(())
+    Ok(missing_chunks.into_iter().collect())
 }
 
 /// Push local commits/objects to a remote.
 ///
 /// 1. Walk local commit graph from the branch head
 /// 2. Collect all reachable objects
-/// 3. Send PushRequest
+/// 3. Sign and send PushRequest
 pub fn push(
     transport: &dyn Transport,
     storage: &FilesystemStorage,
     repo_root: &std::path::Path,
     branch: &str,
+    signing_key: &SigningKey,
 ) -> anyhow::Result<()> {
     let refs = sdal_core::refs::Refs::new(repo_root);
     let ref_name = format!("refs/heads/{}", branch);
@@ -110,7 +209,7 @@ pub fn push(
     };
 
     let req_bytes = serde_json::to_vec(&req)?;
-    let response_bytes = transport.post("/push", req_bytes)?;
+    let response_bytes = signed_post(transport, signing_key, "/push", &req_bytes)?;
     let response: PushResponse = serde_json::from_slice(&response_bytes)?;
 
     if response.success {

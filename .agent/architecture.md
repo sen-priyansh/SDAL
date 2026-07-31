@@ -1,153 +1,157 @@
-# SDAL Networking & Storage Architecture
+# SDAL Ecosystem Architecture Specification
 
 ## Overview
 
-SDAL is designed around a **client-first, protocol-driven architecture**. The client is responsible for reconstructing repositories, while servers (or peers) are responsible only for serving authenticated metadata and chunk data. This separation allows the same protocol to work across cloud servers, self-hosted instances, local office deployments, peer-to-peer networking, and even offline bundle transfers.
+The SDAL ecosystem is intentionally divided into two independent products:
 
-The architecture is intentionally transport-independent. HTTP is the first transport implementation, but the protocol is designed so that SSH, SDALP (native peer protocol), LAN discovery, or offline bundle transfer can all use the exact same synchronization logic.
+1. **SDAL** (Open Source)
+2. **SDAL Hub** (Proprietary)
+
+Although they communicate using the same networking protocol, they are separate codebases with separate responsibilities.
+
+The protocol, message formats, and networking behavior are publicly documented. The implementation of SDAL Hub is proprietary.
 
 ---
 
-# Core Design Philosophy
+# Product Separation
 
-The SDAL client owns repository reconstruction.
+## SDAL (Open Source)
 
-The server **never reconstructs files** and never generates a working directory.
+SDAL is the client-side application and local version control system.
 
-Instead, the server:
+Responsibilities:
 
-* authenticates requests
-* enforces repository policies
-* resolves metadata
-* streams required chunks
+* Repository initialization
+* Content-addressed storage
+* Chunking
+* Commits
+* Trees
+* Blobs
+* Checkout
+* Merge
+* Diff
+* Local repository management
+* Push
+* Pull
+* Fetch
+* Clone
+* Repository reconstruction
+* Cryptographic signing
+* Chunk verification
 
-The client:
+SDAL is responsible for reconstructing repositories.
 
-* downloads metadata
-* determines missing objects
-* downloads missing chunks
-* verifies hashes
-* reconstructs blobs
-* reconstructs files
-* updates the working tree
+It never performs server-side policy management or organization management.
 
-This makes every transport behave identically.
+---
+
+## SDAL Hub (Proprietary)
+
+SDAL Hub is a completely separate application.
+
+It is **not** part of the SDAL repository.
+
+Responsibilities:
+
+* Repository hosting
+* Repository registry
+* Multi-user management
+* Organization management
+* Authentication
+* Authorization
+* Policy enforcement
+* Global chunk storage
+* Repository metadata storage
+* Branch protection
+* Pull request metadata
+* Audit logs
+* Web API
+* Future enterprise features
+
+The Hub does **not** reconstruct repositories.
+
+Its job is to securely provide metadata and chunks.
+
+---
+
+# Design Philosophy
+
+The SDAL client always reconstructs repositories.
+
+The Hub only serves authenticated metadata and chunk data.
+
+This rule must never be violated.
+
+Repository reconstruction logic should exist only once—in the SDAL client.
 
 ---
 
 # High-Level Architecture
 
 ```text
-                    SDAL Ecosystem
+                SDAL Ecosystem
 
-             +-----------------------+
-             |      SDAL CLI         |
-             |-----------------------|
-             | init                  |
-             | commit                |
-             | checkout              |
-             | merge                 |
-             | push/pull             |
-             | clone                 |
-             +-----------+-----------+
-                         |
-                    SDAL Protocol
-                         |
-          +--------------+--------------+
-          |                             |
-   +------+-------+             +-------+------+
-   |   SDAL Hub   |             |  SDAL Peer   |
-   | (HTTP Server)|             | (Future)     |
-   +--------------+             +--------------+
+        +--------------------------+
+        |        SDAL CLI          |
+        |--------------------------|
+        | init                     |
+        | commit                   |
+        | checkout                 |
+        | merge                    |
+        | clone                    |
+        | push                     |
+        | pull                     |
+        | fetch                    |
+        | reconstruct repository   |
+        +------------+-------------+
+                     |
+                SDAL Protocol
+                     |
+              HTTP / HTTPS
+                     |
+        +------------+-------------+
+        |        SDAL Hub          |
+        |--------------------------|
+        | repository registry      |
+        | metadata store           |
+        | global chunk store       |
+        | policy engine            |
+        | authentication           |
+        | organizations            |
+        | branch protection        |
+        | audit                    |
+        +--------------------------+
 ```
-
-The protocol remains identical regardless of transport.
-
----
-
-# Components
-
-## 1. SDAL CLI
-
-Responsibilities:
-
-* local repository management
-* commits
-* checkout
-* merge
-* chunk generation
-* blob reconstruction
-* repository reconstruction
-* request signing
-* hash verification
-
-The CLI should **never contain organization management or server-side policy logic.**
-
----
-
-## 2. SDAL Hub
-
-A dedicated server implementation.
-
-Responsibilities:
-
-* repository registry
-* repository metadata
-* global chunk storage
-* user identity verification
-* policy enforcement
-* branch protection
-* pull request metadata
-* audit logs
-* hooks
-* organization management
-
-The Hub is a data service, not a repository reconstruction engine.
-
----
-
-## 3. SDAL Peer (Future)
-
-A lightweight node implementing the same protocol.
-
-Responsibilities:
-
-* authenticate peers
-* advertise repositories
-* exchange metadata
-* exchange chunks
-
-Unlike SDAL Hub, peers do not require organization or multi-user management.
 
 ---
 
 # Storage Model
 
-The server stores two logically separate datasets.
+The Hub stores two independent categories of data.
 
-## Repository Metadata Store
+## Repository Metadata
 
-Stores information describing repositories.
+Stores repository information.
 
 Examples:
 
-* repository information
+* repository configuration
 * HEAD
 * branch references
 * commit graph
-* trees
+* tree objects
 * blob metadata
-* permissions
+* repository permissions
 * pull requests
-* repository configuration
+* audit metadata
 
-This metadata references chunk hashes but does not own chunk data.
+Repository metadata never stores raw chunk bytes.
 
 ---
 
 ## Global Chunk Store
 
-Stores chunk data only.
+Stores only chunk data.
 
 Properties:
 
@@ -156,51 +160,61 @@ Properties:
 * globally deduplicated
 * hash indexed
 
-Example:
+If identical chunks appear across multiple repositories, only one physical copy is stored.
 
-```text
-Chunk Store
-
-hashA
-hashB
-hashC
-hashD
-```
-
-If two repositories contain identical chunks, only one physical copy exists.
+Repository metadata references chunk hashes.
 
 ---
 
-# Data Relationship
+# Repository Model
 
 ```text
 Repository
-    │
-    ├── refs
-    ├── HEAD
-    ├── permissions
-    └── settings
-          │
-          ▼
-      Commit Graph
-          │
-          ▼
-         Trees
-          │
-          ▼
-         Blobs
-          │
-          ▼
-         Chunks
+
+│
+
+├── HEAD
+
+├── refs
+
+├── settings
+
+├── permissions
+
+│
+
+▼
+
+Commit Graph
+
+│
+
+▼
+
+Trees
+
+│
+
+▼
+
+Blobs
+
+│
+
+▼
+
+Chunk Hashes
+
+│
+
+▼
+
+Global Chunk Store
 ```
 
-Repositories reference metadata.
+The repository contains references.
 
-Metadata references blobs.
-
-Blobs reference chunk hashes.
-
-Chunks store the actual bytes.
+The chunk store contains data.
 
 ---
 
@@ -209,7 +223,7 @@ Chunks store the actual bytes.
 Client executes:
 
 ```bash
-sdal clone <url>
+sdal clone <repository>
 ```
 
 Workflow:
@@ -217,13 +231,36 @@ Workflow:
 1. Request repository metadata.
 2. Receive refs, commits, trees and blob metadata.
 3. Determine required chunk hashes.
-4. Request only required chunks.
+4. Request required chunks.
 5. Verify every chunk hash.
 6. Reconstruct blobs.
 7. Reconstruct files.
 8. Checkout repository.
 
-The server never reconstructs files.
+The Hub never reconstructs files.
+
+---
+
+# Fetch Flow
+
+The client first requests metadata.
+
+Metadata includes:
+
+* refs
+* commits
+* trees
+* blob metadata
+
+The client compares this information with its local repository.
+
+It determines which chunks are already available.
+
+It requests only missing chunks.
+
+The Hub streams those chunks.
+
+The client reconstructs the repository.
 
 ---
 
@@ -231,56 +268,25 @@ The server never reconstructs files.
 
 Client:
 
-* determines new commits
-* determines required blobs
-* determines missing chunks
 * signs request
+* sends metadata
+* sends missing chunks
 
-Server:
+Hub:
 
-* verifies identity
-* validates policy
-* checks existing chunks
+* authenticates client
+* validates permissions
 * stores only missing chunks
-* updates repository metadata
+* updates metadata
 * updates branch references
 
----
-
-# Fetch / Pull Flow
-
-Client requests:
-
-* latest refs
-* required metadata
-
-Server:
-
-* resolves commit graph
-* resolves trees
-* resolves blob metadata
-
-Client:
-
-* determines missing chunks
-* downloads only missing chunks
-* reconstructs repository locally
-
-Pull is simply:
-
-Fetch
-
-*
-
-Checkout
+Duplicate chunks are never stored twice.
 
 ---
 
 # Partial Clone
 
-Because metadata and chunks are separated:
-
-Client can request only a subset of repository metadata.
+The client may request only a subset of the repository.
 
 Example:
 
@@ -288,176 +294,149 @@ Example:
 sdal clone --filter src/
 ```
 
-Server:
+The Hub:
 
-* resolves tree
-* determines blobs under src/
-* determines required chunks
+* resolves the requested subtree
+* determines required blob metadata
+* determines required chunk hashes
 * streams only those chunks
 
-Client reconstructs only requested files.
+The client reconstructs only the requested portion.
 
 ---
 
 # Resumable Downloads
 
-Client maintains existing chunk hashes.
+Because storage is content-addressed:
 
-If download stops:
+The client knows which chunks it already possesses.
 
-Client reconnects and sends:
+Interrupted downloads simply resume by requesting only missing chunk hashes.
 
-Existing chunk hashes
-
-Server only streams missing chunks.
-
-No special resume protocol is necessary.
-
----
-
-# P2P Synchronization
-
-Exactly the same reconstruction process is used.
-
-Example:
-
-Peer A:
-
-Chunk A
-
-Chunk C
-
-Peer B:
-
-Chunk B
-
-Peer C:
-
-Chunk D
-
-Client downloads chunks from whichever peers have them.
-
-After collecting all required chunks, the client reconstructs the repository locally.
-
-Peers never reconstruct repositories.
+No separate resume mechanism is required.
 
 ---
 
 # Protocol Design
 
-The protocol is divided into two phases.
+The networking protocol is divided into two phases.
 
-## Phase 1 — Discovery
+## Phase 1 — Metadata Discovery
 
-Transfer only metadata.
+Transfer:
 
 * refs
-* commits
+* commit graph
 * trees
 * blob metadata
+
+No chunk bytes are transferred.
 
 The client now knows exactly which chunk hashes are required.
 
 ---
 
-## Phase 2 — Data Transfer
+## Phase 2 — Chunk Transfer
 
-Transfer only chunk data.
+The client requests required chunk hashes.
 
-The client verifies every chunk.
+The Hub streams those chunks.
 
-The client reconstructs the repository.
-
-This separation enables:
-
-* partial clone
-* resumable downloads
-* multi-peer downloads
-* prioritized downloads
-* transport independence
+The client verifies hashes and reconstructs the repository locally.
 
 ---
 
-# Identity
+# Authentication
 
 Authentication uses Ed25519 public/private key cryptography.
 
-Every request is signed.
+Every request contains:
 
-Server verifies:
+* public key
+* signature
+* timestamp
+* nonce
+
+The Hub verifies:
 
 * signature
 * timestamp
 * nonce
 
-Identity is represented by public keys rather than usernames or passwords.
+Only then are repository operations allowed.
+
+No passwords are used.
 
 ---
 
-# Policy Layer
+# Policy
 
-Before storage operations:
+Before every repository operation:
 
-1. Verify identity.
+1. Authenticate request.
 2. Resolve repository.
 3. Evaluate policy.
 4. Execute operation.
 
-Examples:
+Policy determines permissions such as:
 
-* can_read()
-* can_push()
-* can_merge()
-
-Branch protection is implemented inside the policy engine.
-
----
-
-# Multi-Repository Support
-
-Repositories are identified using path routing.
-
-Example:
-
-```text
-/owner/repository/...
-```
-
-Server maps this to repository metadata.
-
-The server remains stateless.
+* read
+* push
+* merge
+* administration
 
 ---
 
-# Future Extensions
+# Transport Independence
 
-The architecture is intentionally designed to support future additions without changing the protocol.
+The SDAL protocol is independent of HTTP.
 
-Examples:
+Although SDAL Hub initially uses HTTP/HTTPS, the protocol is designed so future transports can reuse the exact same synchronization model.
 
-* blockchain-backed audit layer
-* enterprise policy modules
-* distributed chunk replication
-* storage engine improvements
-* S3/object storage backend
-* local office deployments
-* air-gapped deployments
-* SDAL Hub SaaS
-* SDAL Peer networking
+Examples include:
 
-None of these require changes to the client reconstruction algorithm.
+* custom peer-to-peer transport
+* LAN synchronization
+* offline bundle transfer
+
+The client reconstruction algorithm never changes.
 
 ---
 
-# Design Principles
+# Public vs Proprietary Boundary
 
-1. Client reconstructs repositories.
-2. Server serves authenticated metadata and chunks.
-3. Protocol is transport independent.
-4. Storage is globally deduplicated.
-5. Identity is cryptographic.
-6. Policy is enforced before storage access.
-7. Metadata and chunk storage remain logically separate.
-8. Every chunk is hash verified before reconstruction.
-9. The protocol is stateless.
-10. Every deployment (Hub, local server, peer, offline bundle) follows the same synchronization model.
+The following are public and documented:
+
+* SDAL protocol specification
+* request/response behavior
+* wire format
+* cryptographic requirements
+* synchronization flow
+
+The following are proprietary and implemented only inside SDAL Hub:
+
+* Hub server application
+* repository registry
+* global chunk storage implementation
+* metadata management implementation
+* policy backend
+* organization management
+* web API implementation
+* enterprise features
+
+This allows SDAL to remain open while SDAL Hub provides the official hosted and self-hosted server implementation.
+
+---
+
+# Architectural Principles
+
+1. SDAL and SDAL Hub are separate applications.
+2. The protocol is the contract between them.
+3. The client always reconstructs repositories.
+4. The Hub only serves authenticated metadata and chunk data.
+5. Metadata and chunk storage remain logically separate.
+6. Storage is globally deduplicated.
+7. Authentication is cryptographic.
+8. Authorization always occurs before storage access.
+9. The protocol remains transport-independent.
+10. Future features must extend this architecture rather than replace it.
