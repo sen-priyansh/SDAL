@@ -66,3 +66,4 @@ The following belong to **SDAL Hub** (separate proprietary repository):
 - [`architecture.md`](./architecture.md): **Canonical SDAL Ecosystem Architecture Specification** — defines product separation, protocol design, storage model, and architectural principles.
 - [`roadmap.md`](./roadmap.md): Status of implemented features and technical specs for remaining tasks.
 - [`plan.md`](./plan.md): **Networking Migration Plan** — gap analysis and phased execution plan for aligning this codebase with the architecture spec.
+- [`hub-spec.md`](./hub-spec.md): **SDAL Hub Server Guide** — implementation details, endpoints, and authentication spec for the proprietary Hub codebase.

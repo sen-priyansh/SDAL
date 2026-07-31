@@ -7,6 +7,7 @@
 // the protocol layer handles the logic.
 
 use anyhow::Result;
+use std::io::Read;
 
 /// Transport-agnostic interface for sending and receiving data.
 ///
@@ -15,8 +16,23 @@ pub trait Transport: Send + Sync {
     /// GET a resource at the given path. Returns raw bytes.
     fn get(&self, path: &str) -> Result<Vec<u8>>;
 
-    /// POST data to the given path. Returns raw response bytes.
+    /// POST a JSON envelope. Returns raw response bytes.
     fn post(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>>;
+
+    /// POST a JSON envelope and a binary stream. Returns a Reader for the response stream.
+    fn post_stream(
+        &self,
+        path: &str,
+        envelope_json: Vec<u8>,
+        body_stream: Box<dyn std::io::Read + Send + 'static>,
+    ) -> Result<Box<dyn std::io::Read + Send>>;
+
+    /// POST a JSON envelope and receive a binary stream.
+    fn post_receive_stream(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<Box<dyn std::io::Read + Send>>;
 }
 
 /// HTTP transport using reqwest (async under the hood, blocking bridge).
@@ -81,6 +97,63 @@ impl Transport for HttpTransport {
 
         Ok(bytes.to_vec())
     }
+
+    fn post_stream(
+        &self,
+        path: &str,
+        envelope_json: Vec<u8>,
+        body_stream: Box<dyn std::io::Read + Send + 'static>,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        let url = format!("{}{}", self.base_url, path);
+
+        // Combine the JSON envelope and the binary stream
+        // Format: [JSON Envelope] \n [Binary Stream]
+        let mut req_body = envelope_json;
+        req_body.push(b'\n');
+        
+        let reader = std::io::Cursor::new(req_body).chain(body_stream);
+
+        let response = self
+            .client
+            .post(&url)
+            .body(reqwest::blocking::Body::new(reader))
+            .send()
+            .map_err(|e| anyhow::anyhow!("HTTP POST stream failed: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "HTTP POST {} returned status {}",
+                url,
+                response.status()
+            );
+        }
+
+        Ok(Box::new(response))
+    }
+
+    fn post_receive_stream(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .post(&url)
+            .body(body)
+            .send()
+            .map_err(|e| anyhow::anyhow!("HTTP POST failed: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "HTTP POST {} returned status {}",
+                url,
+                response.status()
+            );
+        }
+
+        Ok(Box::new(response))
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +190,33 @@ mod tests {
                 .get(path)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Mock: no response for POST {}", path))
+        }
+
+        fn post_stream(
+            &self,
+            path: &str,
+            _envelope: Vec<u8>,
+            _stream: Box<dyn std::io::Read + Send + 'static>,
+        ) -> Result<Box<dyn std::io::Read + Send>> {
+            let data = self
+                .responses
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Mock: no response for POST {}", path))?;
+            Ok(Box::new(std::io::Cursor::new(data)))
+        }
+
+        fn post_receive_stream(
+            &self,
+            path: &str,
+            _body: Vec<u8>,
+        ) -> Result<Box<dyn std::io::Read + Send>> {
+            let data = self
+                .responses
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Mock: no response for POST {}", path))?;
+            Ok(Box::new(std::io::Cursor::new(data)))
         }
     }
 

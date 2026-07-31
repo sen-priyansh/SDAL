@@ -63,19 +63,19 @@ This plan covers **this repository only** — the SDAL open-source client. SDAL 
 
 ---
 
-### Phase 3: Binary Wire Streaming
+### Phase 3: Binary Wire Streaming ✅ COMPLETE
 > **Goal**: Stream chunks with bounded memory using `wire.rs` frames.
 
-- [ ] **Stream Transport Trait**: Refactor `Transport` from `fn post(path, Vec<u8>) -> Vec<u8>` to stream-based reader/writer.
-- [ ] **Wire Integration**: Encode objects as `FrameType::Object` and chunks as `FrameType::Chunk`, terminated by `FrameType::End`.
+- [x] **Stream Transport Trait**: Refactor `Transport` from `fn post(path, Vec<u8>) -> Vec<u8>` to stream-based reader/writer.
+- [x] **Wire Integration**: Encode objects as `FrameType::Object` and chunks as `FrameType::Chunk`, terminated by `FrameType::End`.
 
 ---
 
-### Phase 4: Partial Clone & Resumable Downloads
+### Phase 4: Partial Clone & Resumable Downloads ✅ COMPLETE
 > **Goal**: Advanced client features enabled by 2-phase protocol.
 
-- [ ] **Partial Clone (`--filter <path>`)**: Request metadata for full tree but fetch chunks only under specified subtrees.
-- [ ] **Resumable Downloads**: On interrupted transfers, resume by comparing local chunk hashes against required hashes.
+- [x] **Partial Clone (`--filter <path>`)**: Request metadata for full tree but fetch chunks only under specified subtrees.
+- [x] **Resumable Downloads**: On interrupted transfers, resume by comparing local chunk hashes against required hashes. (Inherently supported by Phase 2 graph walk + atomic CAS).
 
 ---
 

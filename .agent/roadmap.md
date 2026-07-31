@@ -37,20 +37,21 @@ SDAL Hub (proprietary server) is a separate application and is not tracked here.
 ## 🔧 Codebase Cleanup Required
 
 - [x] **Remove `server.rs` and `sdal serve`**: The `server.rs` file in `crates/network/` and the `Serve` CLI command implement server-side functionality that belongs in SDAL Hub. These should be removed from this repository.
-- [x] **Remove server-side protocol handlers**: The `handle_fetch`, `handle_push`, and `list_refs` functions in `protocol.rs` are server-side logic. Protocol types (structs) should stay; server handlers should be removed.
-- [x] **Clean up dependencies**: Policy enforcement is Hub-side. This crate should only contain shared types/primitives that both SDAL and the Hub can use. Axum is also removed.
-
 - [x] **2-Phase Protocol (Client-Side)**:
   - Splitted client fetch into Phase 1 (metadata discovery) and Phase 2 (chunk transfer).
   - Implemented client-side graph resolution to walk local commit graph and build accurate `have_chunks` set, ensuring only missing chunks are transferred.
+- [x] **Binary Wire Streaming**:
+  - Implemented memory-bounded transfers via `wire.rs` frames.
+  - Added `post_stream` and `post_receive_stream` to `Transport` trait.
+  - Client streaming: `push` uses a custom `PushStreamer` to incrementally yield frames; `fetch` reads frames dynamically, avoiding memory bloat for large clones.
+- [x] **Partial Clone (`--filter`) & Resumable Downloads**:
+  - Added `--filter` flag to `fetch`, `pull`, and `clone` CLI commands.
+  - Client locally prunes `want_chunks` calculation based on the filter tree path.
+  - Client automatically supports resumable chunk downloads thanks to phase 2 graph walking over local CAS storage state.
 
 ---
 
 ## 🔮 Remaining Tasks
-
-### 1. Binary Wire Streaming
-- **Focus**: Memory-bounded transfers using `wire.rs` frames.
-- **Task**: Refactor `Transport` trait to support stream-based I/O. Client should stream `wire::Frame` sequences to/from the network without buffering entire payloads in memory.
 
 ### 4. Partial Clone (`--filter`)
 - **Focus**: Allow cloning subsets of a repository.

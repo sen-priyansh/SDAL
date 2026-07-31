@@ -43,11 +43,9 @@ pub struct ChunkResponse {
     pub chunks: Vec<TransferObject>,
 }
 
-/// Push: client sends objects and declares the new branch head.
+/// Push: client sends branch metadata, then streams objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushRequest {
-    /// All objects being pushed (commits, trees, blobs, chunks)
-    pub objects: Vec<TransferObject>,
     /// The new HEAD commit hash for the branch
     pub new_head: String,
     /// Target branch name

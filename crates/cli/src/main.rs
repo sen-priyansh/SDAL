@@ -239,6 +239,9 @@ enum Commands {
     Fetch {
         /// Remote name (e.g., 'origin')
         remote: String,
+        /// Optional path filter for partial fetch (e.g. 'src/')
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// Pull changes from a remote (fetch + update working directory)
@@ -247,6 +250,9 @@ enum Commands {
     Pull {
         /// Remote name (e.g., 'origin')
         remote: String,
+        /// Optional path filter for partial pull (e.g. 'src/')
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// Clone a remote SDAL repository
@@ -255,6 +261,9 @@ enum Commands {
     Clone {
         /// Remote URL (e.g., http://127.0.0.1:7272)
         url: String,
+        /// Optional path filter for partial clone (e.g. 'src/')
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// Manage remote repositories
@@ -1333,7 +1342,7 @@ async fn main() -> Result<()> {
             let transport = sdal_network::transport::HttpTransport::new(&remote_url);
             sdal_network::client::push(&transport, &storage, &sdal_root, &branch_name, &signing_key)?;
         }
-        Commands::Fetch { remote } => {
+        Commands::Fetch { remote, filter } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
@@ -1353,7 +1362,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key)?;
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key, filter.clone())?;
 
             // Update remote-tracking refs
             let refs = Refs::new(&sdal_root);
@@ -1366,7 +1375,7 @@ async fn main() -> Result<()> {
 
             println!("  ✓ Fetch complete");
         }
-        Commands::Pull { remote } => {
+        Commands::Pull { remote, filter } => {
             if !sdal_root.exists() {
                 anyhow::bail!("Not an SDAL repository");
             }
@@ -1399,6 +1408,7 @@ async fn main() -> Result<()> {
                 vec![remote_head.clone()],
                 &sdal_root,
                 &signing_key,
+                filter.clone(),
             )?;
 
             let local_ref = format!("refs/heads/{}", current_branch);
@@ -1413,7 +1423,7 @@ async fn main() -> Result<()> {
 
             println!("  ✓ Pull complete — updated '{}' to {}", current_branch, &remote_head[..7]);
         }
-        Commands::Clone { url } => {
+        Commands::Clone { url, filter } => {
             if sdal_root.exists() {
                 anyhow::bail!("Directory already contains an SDAL repository");
             }
@@ -1441,7 +1451,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key)?;
+            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key, filter.clone())?;
 
             for (ref_name, hash) in &refs_response.refs {
                 refs.update_ref(ref_name, hash)?;

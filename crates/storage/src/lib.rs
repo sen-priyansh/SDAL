@@ -29,6 +29,7 @@ pub trait Storage {
     -> Result<(), StorageError>;
 }
 
+#[derive(Clone)]
 pub struct FilesystemStorage {
     root: PathBuf,
 }

@@ -62,6 +62,7 @@ pub fn fetch(
     want: Vec<String>,
     _repo_root: &std::path::Path,
     signing_key: &SigningKey,
+    filter: Option<String>,
 ) -> anyhow::Result<()> {
     // 1. Phase 1: Request metadata
     let meta_req = MetadataRequest { want: want.clone() };
@@ -79,7 +80,7 @@ pub fn fetch(
     println!("  ✓ Received {} metadata objects", meta_resp.objects.len());
 
     // 2. Client-side graph traversal to find missing chunks
-    let want_chunks = compute_missing_chunks(storage, &want)?;
+    let want_chunks = compute_missing_chunks(storage, &want, filter.as_deref())?;
 
     if want_chunks.is_empty() {
         println!("  ✓ All chunks already present locally. No chunk download needed.");
@@ -91,14 +92,33 @@ pub fn fetch(
     let chunk_req = ChunkRequest { want_chunks };
     let chunk_req_bytes = serde_json::to_vec(&chunk_req)?;
 
-    let chunk_resp_bytes = signed_post(transport, signing_key, "/chunks/fetch", &chunk_req_bytes)?;
-    let chunk_resp: ChunkResponse = serde_json::from_slice(&chunk_resp_bytes)?;
+    // Send the signed envelope and receive a stream of wire::Frame
+    let envelope = identity::sign_payload(signing_key, &chunk_req_bytes);
+    let envelope_json = serde_json::to_vec(&envelope)?;
+    
+    let mut response_stream = transport.post_receive_stream("/chunks/fetch", envelope_json)?;
 
-    for obj in &chunk_resp.chunks {
-        verify_and_store(storage, obj)?;
+    let mut chunks_received = 0;
+    while let Some(frame) = crate::wire::read_frame(&mut response_stream)? {
+        if frame.frame_type != crate::wire::FrameType::Chunk {
+            anyhow::bail!("Expected Chunk frame, got {:?}", frame.frame_type);
+        }
+
+        // The chunk hash is not sent in the frame (since the frame just contains bytes)
+        // Wait! How do we know the hash of the chunk? 
+        // We can just hash the data to find out!
+        let mut hasher = Sha256::new();
+        hasher.update(&frame.data);
+        let hash = hex::encode(hasher.finalize());
+
+        match storage.put(&hash, &frame.data) {
+            Ok(_) => chunks_received += 1,
+            Err(sdal_storage::StorageError::AlreadyExists(_)) => chunks_received += 1, // Deduplication
+            Err(e) => return Err(e.into()),
+        }
     }
 
-    println!("  ✓ Received {} chunks", chunk_resp.chunks.len());
+    println!("  ✓ Received {} chunks", chunks_received);
 
     Ok(())
 }
@@ -124,20 +144,23 @@ fn verify_and_store(storage: &FilesystemStorage, obj: &TransferObject) -> anyhow
 fn compute_missing_chunks(
     storage: &FilesystemStorage,
     wants: &[String],
+    filter: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     let mut missing_chunks: HashSet<String> = HashSet::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut visited: HashSet<(String, std::path::PathBuf)> = HashSet::new();
+    let mut queue: VecDeque<(String, std::path::PathBuf)> = VecDeque::new();
 
     for w in wants {
-        queue.push_back(w.clone());
+        queue.push_back((w.clone(), std::path::PathBuf::new()));
     }
 
-    while let Some(hash) = queue.pop_front() {
-        if visited.contains(&hash) || hash.is_empty() {
+    let filter_path = filter.map(std::path::Path::new);
+
+    while let Some((hash, current_path)) = queue.pop_front() {
+        if visited.contains(&(hash.clone(), current_path.clone())) || hash.is_empty() {
             continue;
         }
-        visited.insert(hash.clone());
+        visited.insert((hash.clone(), current_path.clone()));
 
         let data = match storage.get(&hash) {
             Ok(d) => d,
@@ -148,15 +171,28 @@ fn compute_missing_chunks(
             match obj {
                 Object::Commit(commit) => {
                     for parent in &commit.parents {
-                        queue.push_back(parent.clone());
+                        queue.push_back((parent.clone(), std::path::PathBuf::new()));
                     }
-                    queue.push_back(commit.tree.clone());
+                    queue.push_back((commit.tree.clone(), std::path::PathBuf::new()));
                 }
                 Object::Tree(tree) => {
-                    for (_, entry) in &tree.entries {
-                        match entry {
-                            sdal_core::TreeEntry::Blob { hash, .. } => queue.push_back(hash.clone()),
-                            sdal_core::TreeEntry::Tree { hash } => queue.push_back(hash.clone()),
+                    for (name, entry) in &tree.entries {
+                        let mut next_path = current_path.clone();
+                        next_path.push(name);
+
+                        // If filter is provided, check if next_path is on the way to filter or inside filter
+                        let should_traverse = match filter_path {
+                            Some(f) => {
+                                next_path.starts_with(f) || f.starts_with(&next_path)
+                            }
+                            None => true,
+                        };
+
+                        if should_traverse {
+                            match entry {
+                                sdal_core::TreeEntry::Blob { hash, .. } => queue.push_back((hash.clone(), next_path)),
+                                sdal_core::TreeEntry::Tree { hash } => queue.push_back((hash.clone(), next_path)),
+                            }
                         }
                     }
                 }
@@ -177,8 +213,9 @@ fn compute_missing_chunks(
 /// Push local commits/objects to a remote.
 ///
 /// 1. Walk local commit graph from the branch head
-/// 2. Collect all reachable objects
-/// 3. Sign and send PushRequest
+/// 2. Collect all reachable object hashes
+/// 3. Sign the PushRequest metadata
+/// 4. Stream all objects as wire::Frames
 pub fn push(
     transport: &dyn Transport,
     storage: &FilesystemStorage,
@@ -197,19 +234,29 @@ pub fn push(
         anyhow::bail!("Branch '{}' has no commits", branch);
     }
 
-    // Walk local commit graph and collect all objects
-    let objects = collect_push_objects(storage, &head_hash)?;
+    // Walk local commit graph and collect all object hashes
+    let object_hashes = collect_push_object_hashes(storage, &head_hash)?;
 
-    println!("  Pushing {} objects to remote...", objects.len());
+    println!("  Pushing {} objects to remote...", object_hashes.len());
 
     let req = PushRequest {
-        objects,
         new_head: head_hash.clone(),
         branch: branch.to_string(),
     };
 
     let req_bytes = serde_json::to_vec(&req)?;
-    let response_bytes = signed_post(transport, signing_key, "/push", &req_bytes)?;
+    let envelope = identity::sign_payload(signing_key, &req_bytes);
+    let envelope_json = serde_json::to_vec(&envelope)?;
+
+    // Stream the objects to the server
+    let streamer = PushStreamer::new(storage.clone(), object_hashes);
+    let mut response_stream = transport.post_stream("/push", envelope_json, Box::new(streamer))?;
+    
+    // The server will respond with a JSON PushResponse at the end of the stream
+    let mut response_bytes = Vec::new();
+    use std::io::Read;
+    response_stream.read_to_end(&mut response_bytes)?;
+
     let response: PushResponse = serde_json::from_slice(&response_bytes)?;
 
     if response.success {
@@ -221,14 +268,97 @@ pub fn push(
     Ok(())
 }
 
+/// A reader that streams objects from storage as wire frames.
+struct PushStreamer {
+    storage: FilesystemStorage,
+    hashes: Vec<String>,
+    current_index: usize,
+    buffer: std::io::Cursor<Vec<u8>>,
+    eof: bool,
+}
+
+impl PushStreamer {
+    fn new(storage: FilesystemStorage, hashes: Vec<String>) -> Self {
+        Self {
+            storage,
+            hashes,
+            current_index: 0,
+            buffer: std::io::Cursor::new(Vec::new()),
+            eof: false,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> std::io::Result<()> {
+        if self.current_index >= self.hashes.len() {
+            if !self.eof {
+                // Write EOF frame
+                let mut out = Vec::new();
+                crate::wire::write_end(&mut out)?;
+                self.buffer = std::io::Cursor::new(out);
+                self.eof = true;
+            }
+            return Ok(());
+        }
+
+        let hash = &self.hashes[self.current_index];
+        self.current_index += 1;
+
+        // Read object from storage
+        let data = match self.storage.get(hash) {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Failed to read object {}: {}", hash, e),
+                ));
+            }
+        };
+
+        // Determine frame type (chunk or object metadata)
+        // A simple heuristic: if it parses as an Object, it's Object. Otherwise Chunk.
+        let frame_type = if Object::from_bytes(&data).is_ok() {
+            crate::wire::FrameType::Object
+        } else {
+            crate::wire::FrameType::Chunk
+        };
+
+        let frame = crate::wire::Frame { frame_type, data };
+        let mut out = Vec::new();
+        crate::wire::write_frame(&mut out, &frame)?;
+        self.buffer = std::io::Cursor::new(out);
+
+        Ok(())
+    }
+}
+
+impl std::io::Read for PushStreamer {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            // Try to read from the current buffer
+            let n = std::io::Read::read(&mut self.buffer, buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+
+            // If the buffer is empty, check if we're at EOF
+            if self.eof {
+                return Ok(0);
+            }
+
+            // Fill the buffer with the next frame
+            self.fill_buffer()?;
+        }
+    }
+}
+
 /// Walk the commit graph starting from `head` and collect all
-/// reachable objects (commits, trees, blobs, chunks).
-fn collect_push_objects(
+/// reachable object hashes (commits, trees, blobs, chunks).
+fn collect_push_object_hashes(
     storage: &FilesystemStorage,
     head: &str,
-) -> anyhow::Result<Vec<TransferObject>> {
+) -> anyhow::Result<Vec<String>> {
     let mut visited: HashSet<String> = HashSet::new();
-    let mut objects: Vec<TransferObject> = Vec::new();
+    let mut objects: Vec<String> = Vec::new();
     let mut queue: VecDeque<String> = VecDeque::new();
 
     queue.push_back(head.to_string());
@@ -244,10 +374,7 @@ fn collect_push_objects(
             Err(_) => continue,
         };
 
-        objects.push(TransferObject {
-            hash: hash.clone(),
-            data: data.clone(),
-        });
+        objects.push(hash.clone());
 
         // Parse and walk graph
         if let Ok(obj) = Object::from_bytes(&data) {
@@ -277,11 +404,8 @@ fn collect_push_objects(
                     for chunk_entry in &blob.chunks {
                         if !visited.contains(&chunk_entry.hash) {
                             visited.insert(chunk_entry.hash.clone());
-                            if let Ok(chunk_data) = storage.get(&chunk_entry.hash) {
-                                objects.push(TransferObject {
-                                    hash: chunk_entry.hash.clone(),
-                                    data: chunk_data,
-                                });
+                            if storage.exists(&chunk_entry.hash) {
+                                objects.push(chunk_entry.hash.clone());
                             }
                         }
                     }
