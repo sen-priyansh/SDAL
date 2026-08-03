@@ -203,6 +203,9 @@ fn compute_missing_chunks(
                         }
                     }
                 }
+                Object::PullRequest(pr) => {
+                    queue.push_back((pr.head_commit.clone(), current_path.clone()));
+                }
             }
         }
     }
@@ -408,6 +411,11 @@ fn collect_push_object_hashes(
                                 objects.push(chunk_entry.hash.clone());
                             }
                         }
+                    }
+                }
+                Object::PullRequest(pr) => {
+                    if !visited.contains(&pr.head_commit) {
+                        queue.push_back(pr.head_commit.clone());
                     }
                 }
             }

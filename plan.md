@@ -11,4 +11,6 @@ See [`.agent/plan.md`](./.agent/plan.md) for the full plan.
 2. **2-Phase Protocol** ✅ — Separate metadata discovery from chunk transfer (client-side)
 3. **Wire Streaming** ✅ — Stream `wire.rs` frames with bounded RAM
 4. **Partial Clone & Resume** ✅ — `--filter`, resumable downloads
-5. **P2P Transport** — Direct peer-to-peer sync
+5. **P2P Transport** ✅ — Direct peer-to-peer sync
+6. **Native Pull Requests** ✅ — Native PR CLI commands and PR object natively stored in CAS.
+7. **Garbage Collection** ✅ — Native `sdal gc` command for memory management.

@@ -375,10 +375,37 @@ impl Commit {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PullRequest {
+    pub base_branch: String,
+    pub head_branch: String,
+    pub head_commit: String,
+    pub title: String,
+    pub description: String,
+    pub author: String,
+    pub timestamp: i64,
+}
+
+impl PullRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.base_branch.is_empty() {
+            return Err("PullRequest must have a base branch".to_string());
+        }
+        if self.head_branch.is_empty() {
+            return Err("PullRequest must have a head branch".to_string());
+        }
+        if self.head_commit.is_empty() {
+            return Err("PullRequest must have a head commit".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Object {
     Blob(Blob),
     Tree(Tree),
     Commit(Commit),
+    PullRequest(PullRequest),
 }
 
 impl Object {
@@ -388,6 +415,7 @@ impl Object {
             Object::Blob(blob) => blob.validate(),
             Object::Tree(tree) => tree.validate(),
             Object::Commit(commit) => commit.validate(),
+            Object::PullRequest(pr) => pr.validate(),
         }
     }
 

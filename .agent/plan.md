@@ -79,11 +79,29 @@ This plan covers **this repository only** — the SDAL open-source client. SDAL 
 
 ---
 
-### Phase 5: P2P Transport
+### Phase 5: P2P Transport ✅ COMPLETE
 > **Goal**: Direct peer-to-peer sync without any server.
 
-- [ ] **P2P Transport Implementation**: Implement `P2pTransport` using the same 2-phase protocol over direct peer connections.
-- [ ] **Multi-Peer Downloads**: Client downloads chunks from whichever peers have them.
+- [x] **P2P Transport Implementation**: Implement `P2pTransport` using the same 2-phase protocol over direct peer connections (via `sdalp://` protocol).
+- [x] **Multi-Peer Downloads**: Client connects to peers via TCP using `sdal peer-serve` and streams chunks directly.
+
+---
+
+### Phase 6: Native Pull Requests ✅ COMPLETE
+> **Goal**: Local code review workflows.
+
+- [x] **PullRequest Object**: Extend `Object` enum to include `PullRequest` storing PR metadata.
+- [x] **PR CLI Subcommands**: Implement `sdal pr create`, `sdal pr list`, `sdal pr merge`.
+- [x] **PR P2P Synchronization**: Ensure graph resolution logic in `client.rs` and `p2p.rs` parses PR metadata correctly for transfers.
+
+---
+
+### Phase 7: Garbage Collection ✅ COMPLETE
+> **Goal**: Disk space management.
+
+- [x] **Garbage Collector CLI (`sdal gc`)**: Command to locate active roots (branches, PRs, checkpoints, HEAD).
+- [x] **Reachability Traversal**: Traverses all reachable commit graphs, trees, and chunk hashes.
+- [x] **CAS Pruning**: Safely removes unvisited files from `.sdal/objects/`.
 
 ---
 

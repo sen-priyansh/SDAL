@@ -10,4 +10,5 @@ pub mod transport;
 pub mod protocol;
 pub mod client;
 pub mod identity;
+pub mod p2p;
 pub mod wire;

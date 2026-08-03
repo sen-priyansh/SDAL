@@ -271,6 +271,53 @@ enum Commands {
     /// Add, remove, or list remote repository URLs.
     #[command(subcommand)]
     Remote(RemoteCommands),
+
+    /// Start a P2P server to serve the local repository directly to peers
+    ///
+    /// Listens on a TCP port for direct peer connections.
+    PeerServe {
+        /// Port to listen on (default: 9090)
+        #[arg(short, long, default_value_t = 9090)]
+        port: u16,
+    },
+
+    /// Manage local pull requests
+    ///
+    /// Create, list, or merge native pull requests stored as objects in CAS.
+    #[command(subcommand)]
+    Pr(PrCommands),
+
+    /// Run garbage collection to manage disk space
+    ///
+    /// Traverses all branch heads and PRs to find reachable objects and deletes
+    /// dangling objects in the `.sdal/objects/` store.
+    Gc,
+}
+
+#[derive(Subcommand)]
+enum PrCommands {
+    /// Create a new native pull request
+    Create {
+        /// Base branch to merge into (e.g., 'main')
+        #[arg(short, long)]
+        base: String,
+        /// Head branch to be merged (e.g., 'feature')
+        #[arg(short, long)]
+        head: String,
+        /// Title of the PR
+        #[arg(short, long)]
+        title: String,
+        /// Description of the PR
+        #[arg(short, long, default_value_t = String::new())]
+        description: String,
+    },
+    /// List all local pull requests
+    List,
+    /// Merge a pull request
+    Merge {
+        /// Pull request ID
+        id: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -545,6 +592,13 @@ async fn main() -> Result<()> {
                 }
                 Object::Commit(_) => {
                     anyhow::bail!("Cannot cat a commit object (use 'sdal log')");
+                }
+                Object::PullRequest(pr) => {
+                    println!("Pull Request: {}", pr.title);
+                    println!("Author: {}", pr.author);
+                    println!("Base: {}", pr.base_branch);
+                    println!("Head: {} (commit {})", pr.head_branch, pr.head_commit);
+                    println!("\n{}", pr.description);
                 }
             }
         }
@@ -1339,8 +1393,8 @@ async fn main() -> Result<()> {
 
             println!("Pushing to {} ({}) branch '{}'...", remote, remote_url, branch_name);
 
-            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            sdal_network::client::push(&transport, &storage, &sdal_root, &branch_name, &signing_key)?;
+            let transport = get_transport(&remote_url);
+            sdal_network::client::push(transport.as_ref(), &storage, &sdal_root, &branch_name, &signing_key)?;
         }
         Commands::Fetch { remote, filter } => {
             if !sdal_root.exists() {
@@ -1353,8 +1407,8 @@ async fn main() -> Result<()> {
 
             println!("Fetching from {} ({})...", remote, remote_url);
 
-            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
+            let transport = get_transport(&remote_url);
+            let refs_response = sdal_network::client::fetch_refs(transport.as_ref(), &signing_key)?;
 
             let want: Vec<String> = refs_response.refs.values().cloned().collect();
             if want.is_empty() {
@@ -1362,7 +1416,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key, filter.clone())?;
+            sdal_network::client::fetch(transport.as_ref(), &storage, want, &sdal_root, &signing_key, filter.clone())?;
 
             // Update remote-tracking refs
             let refs = Refs::new(&sdal_root);
@@ -1387,8 +1441,8 @@ async fn main() -> Result<()> {
 
             println!("Pulling from {} ({})...", remote, remote_url);
 
-            let transport = sdal_network::transport::HttpTransport::new(&remote_url);
-            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
+            let transport = get_transport(&remote_url);
+            let refs_response = sdal_network::client::fetch_refs(transport.as_ref(), &signing_key)?;
 
             let current_branch = refs
                 .get_current_branch()?
@@ -1403,7 +1457,7 @@ async fn main() -> Result<()> {
                 })?;
 
             sdal_network::client::fetch(
-                &transport,
+                transport.as_ref(),
                 &storage,
                 vec![remote_head.clone()],
                 &sdal_root,
@@ -1442,8 +1496,8 @@ async fn main() -> Result<()> {
             save_remote_url(&sdal_root, "origin", &url)?;
 
             let storage = FilesystemStorage::new(&sdal_root)?;
-            let transport = sdal_network::transport::HttpTransport::new(&url);
-            let refs_response = sdal_network::client::fetch_refs(&transport, &signing_key)?;
+            let transport = get_transport(&url);
+            let refs_response = sdal_network::client::fetch_refs(transport.as_ref(), &signing_key)?;
 
             let want: Vec<String> = refs_response.refs.values().cloned().collect();
             if want.is_empty() {
@@ -1451,7 +1505,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            sdal_network::client::fetch(&transport, &storage, want, &sdal_root, &signing_key, filter.clone())?;
+            sdal_network::client::fetch(transport.as_ref(), &storage, want, &sdal_root, &signing_key, filter.clone())?;
 
             for (ref_name, hash) in &refs_response.refs {
                 refs.update_ref(ref_name, hash)?;
@@ -1495,6 +1549,310 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::PeerServe { port } => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            sdal_network::p2p::serve_p2p(&sdal_root, port)?;
+        }
+        Commands::Pr(cmd) => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+
+            match cmd {
+                PrCommands::Create { base, head, title, description } => {
+                    let head_ref = format!("refs/heads/{}", head);
+                    let base_ref = format!("refs/heads/{}", base);
+                    
+                    let head_commit = refs.read_ref(&head_ref)?.ok_or_else(|| anyhow::anyhow!("Head branch '{}' not found", head))?;
+                    if refs.read_ref(&base_ref)?.is_none() {
+                        anyhow::bail!("Base branch '{}' not found", base);
+                    }
+
+                    // For author, use global identity or fallback
+                    let author = "Local User".to_string();
+
+                    let pr = sdal_core::PullRequest {
+                        base_branch: base.clone(),
+                        head_branch: head.clone(),
+                        head_commit,
+                        title: title.clone(),
+                        description,
+                        author,
+                        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64,
+                    };
+
+                    let obj = sdal_core::Object::PullRequest(pr);
+                    let obj_json = serde_json::to_vec(&obj)?;
+
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(&obj_json);
+                    let hash = hex::encode(hasher.finalize());
+
+                    storage.put(&hash, &obj_json)?;
+
+                    let mut next_id = 1;
+                    loop {
+                        let pr_ref = format!("refs/pull/{}", next_id);
+                        if refs.read_ref(&pr_ref)?.is_none() {
+                            refs.update_ref(&pr_ref, &hash)?;
+                            break;
+                        }
+                        next_id += 1;
+                    }
+
+                    println!("  ✓ Created PR #{} ({})", next_id, title);
+                    println!("    {} -> {}", head, base);
+                }
+                PrCommands::List => {
+                    let pull_dir = sdal_root.join("refs").join("pull");
+                    let mut found = false;
+                    if let Ok(entries) = std::fs::read_dir(&pull_dir) {
+                        let mut prs = Vec::new();
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                if let Ok(id) = name.parse::<usize>() {
+                                    if let Ok(hash) = std::fs::read_to_string(entry.path()) {
+                                        prs.push((id, hash.trim().to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        prs.sort_by_key(|k| k.0);
+                        
+                        for (id, hash) in prs {
+                            if let Ok(data) = storage.get(&hash) {
+                                if let Ok(sdal_core::Object::PullRequest(pr)) = sdal_core::Object::from_bytes(&data) {
+                                    println!("#{}: {} ({} -> {})", id, pr.title, pr.head_branch, pr.base_branch);
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        println!("No open pull requests.");
+                    }
+                }
+                PrCommands::Merge { id } => {
+                    let pr_ref_path = sdal_root.join("refs").join("pull").join(id.to_string());
+                    if !pr_ref_path.exists() {
+                        anyhow::bail!("PR #{} not found", id);
+                    }
+                    let hash = std::fs::read_to_string(&pr_ref_path)?;
+                    let hash = hash.trim();
+                    
+                    let data = storage.get(hash)?;
+                    let pr = match sdal_core::Object::from_bytes(&data).map_err(|e| anyhow::anyhow!(e))? {
+                        sdal_core::Object::PullRequest(pr) => pr,
+                        _ => anyhow::bail!("Invalid PR object in CAS"),
+                    };
+
+                    let current_branch = refs.get_current_branch()?.ok_or_else(|| anyhow::anyhow!("Not on any branch"))?;
+                    if current_branch != pr.base_branch {
+                        anyhow::bail!("Must checkout base branch '{}' to merge PR #{}", pr.base_branch, id);
+                    }
+                    
+                    let index = Index::load(&sdal_root)?;
+                    if !index.entries.is_empty() {
+                        anyhow::bail!("Cannot merge with uncommitted changes. Commit or stash them first.");
+                    }
+                    let checkpoint_index = sdal_checkpoint::ops::list_checkpoints(&sdal_root)?;
+                    if !checkpoint_index.checkpoints.is_empty() {
+                        anyhow::bail!("Cannot merge with active checkpoints. Commit or drop them first.");
+                    }
+
+                    println!("Merging PR #{} ({} -> {})...", id, pr.head_branch, pr.base_branch);
+                    
+                    let ours_hash = refs.read_head()?.ok_or(anyhow::anyhow!("No commits yet"))?;
+                    
+                    // The head branch might be remote or local. If it's remote, the user could have pushed it locally or we can use the head_commit directly.
+                    // But perform_merge takes a branch name. Wait, perform_merge resolves the branch name to a commit hash!
+                    // So we can just resolve the commit hash and pass it directly? 
+                    // Wait, perform_merge takes `&branch`. Let's look at `perform_merge`.
+                    // It uses `refs.read_ref(&format!("refs/heads/{}", target_branch))`.
+                    // But for PR, we already know the `pr.head_commit`!
+                    // Wait, `perform_merge` requires the branch name. Let's see if we can just create a temporary branch for the PR!
+                    
+                    let pr_temp_branch = format!("pr-{}", id);
+                    refs.create_branch(&pr_temp_branch, &pr.head_commit)?;
+                    
+                    let merge_state = sdal_core::merge::perform_merge(&pr_temp_branch, &ours_hash, &sdal_root, &storage)?;
+                    
+                    // Cleanup temp branch
+                    refs.delete_branch(&pr_temp_branch)?;
+
+                    checkout::restore_tree_clean(&merge_state.merged_tree_hash, &storage, &current_dir, &Ignore::load(&current_dir))?;
+
+                    let mut index = Index::load(&sdal_root)?;
+                    index.clear();
+                    sdal_core::merge::populate_index_from_tree(
+                        &merge_state.merged_tree_hash,
+                        &storage,
+                        &mut index,
+                        "",
+                    )?;
+                    index.save(&sdal_root)?;
+
+                    if merge_state.conflicts.is_empty() {
+                        println!("Merge successful! No conflicts.");
+                        println!("Run 'sdal commit' to finalize the PR merge.");
+                        merge_state.save(&sdal_root)?;
+                        let _ = std::fs::remove_file(&pr_ref_path); // close PR
+                    } else {
+                        println!("Merge conflict! Conflicts in:");
+                        for conflict in &merge_state.conflicts {
+                            println!("  - {}", conflict);
+                            if let Some((ours_blob, _theirs_blob)) = merge_state.conflict_details.get(conflict.as_str()) {
+                                let file_path = current_dir.join(conflict);
+                                sdal_core::checkout::restore_blob(ours_blob, &storage, &file_path)?;
+                            }
+                        }
+                        println!("\nConflicts detected but left in object storage.");
+                        println!("Resolve conflicts with 'sdal mergetool', then run 'sdal commit'");
+                        merge_state.save(&sdal_root)?;
+                        let conflict_index = sdal_core::merge::ConflictIndex::from_merge_state(&merge_state);
+                        conflict_index.save(&sdal_root)?;
+                        let _ = std::fs::remove_file(&pr_ref_path); // close PR
+                    }
+                }
+            }
+        }
+        Commands::Gc => {
+            if !sdal_root.exists() {
+                anyhow::bail!("Not an SDAL repository");
+            }
+            println!("Starting garbage collection...");
+            
+            let storage = FilesystemStorage::new(&sdal_root)?;
+            let refs = Refs::new(&sdal_root);
+            
+            let mut roots = Vec::new();
+            
+            if let Ok(branches) = refs.list_branches() {
+                for b in branches {
+                    if let Ok(Some(hash)) = refs.read_ref(&format!("refs/heads/{}", b)) {
+                        roots.push(hash);
+                    }
+                }
+            }
+            
+            let pull_dir = sdal_root.join("refs").join("pull");
+            if let Ok(entries) = std::fs::read_dir(&pull_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(hash) = std::fs::read_to_string(entry.path()) {
+                        roots.push(hash.trim().to_string());
+                    }
+                }
+            }
+            
+            if let Ok(index) = sdal_checkpoint::ops::list_checkpoints(&sdal_root) {
+                for cp in index.checkpoints {
+                    roots.push(cp.tree_root);
+                    if let Some(pc) = cp.parent_commit {
+                        roots.push(pc);
+                    }
+                }
+            }
+            
+            if let Ok(Some(hash)) = refs.read_head() {
+                roots.push(hash);
+            }
+
+            if sdal_core::merge::MergeState::load(&sdal_root)?.is_some() {
+                anyhow::bail!("Cannot run GC while a merge is in progress.");
+            }
+            
+            println!("Found {} roots.", roots.len());
+            
+            let mut visited = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            
+            for r in roots {
+                queue.push_back(r);
+            }
+            
+            while let Some(hash) = queue.pop_front() {
+                if visited.contains(&hash) {
+                    continue;
+                }
+                visited.insert(hash.clone());
+                
+                if let Ok(data) = storage.get(&hash) {
+                    if let Ok(obj) = sdal_core::Object::from_bytes(&data) {
+                        match obj {
+                            sdal_core::Object::Commit(c) => {
+                                for p in c.parents {
+                                    queue.push_back(p);
+                                }
+                                queue.push_back(c.tree);
+                            }
+                            sdal_core::Object::Tree(t) => {
+                                for (_, entry) in t.entries {
+                                    match entry {
+                                        sdal_core::TreeEntry::Blob { hash, .. } => queue.push_back(hash),
+                                        sdal_core::TreeEntry::Tree { hash } => queue.push_back(hash),
+                                    }
+                                }
+                            }
+                            sdal_core::Object::Blob(b) => {
+                                for chunk in b.chunks {
+                                    visited.insert(chunk.hash);
+                                }
+                            }
+                            sdal_core::Object::PullRequest(pr) => {
+                                queue.push_back(pr.head_commit);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            println!("Marked {} reachable objects/chunks.", visited.len());
+            
+            let objects_dir = sdal_root.join("objects");
+            let mut deleted = 0;
+            let mut total_size_freed = 0;
+            
+            for entry in walkdir::WalkDir::new(&objects_dir) {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                
+                if entry.file_type().is_file() {
+                    let file_name = entry.file_name().to_string_lossy();
+                    if let Some(parent) = entry.path().parent() {
+                        let dir_name = parent.file_name().unwrap_or_default().to_string_lossy();
+                        if dir_name.len() == 2 && file_name.len() == 62 {
+                            let hash = format!("{}{}", dir_name, file_name);
+                            if !visited.contains(&hash) {
+                                if let Ok(metadata) = entry.metadata() {
+                                    total_size_freed += metadata.len();
+                                }
+                                if std::fs::remove_file(entry.path()).is_ok() {
+                                    deleted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            for entry in walkdir::WalkDir::new(&objects_dir).contents_first(true) {
+                if let Ok(entry) = entry {
+                    if entry.file_type().is_dir() && entry.path() != objects_dir {
+                        let _ = std::fs::remove_dir(entry.path());
+                    }
+                }
+            }
+            
+            println!("Garbage collection complete!");
+            println!("Deleted {} dangling objects, freeing {} bytes.", deleted, total_size_freed);
+        }
     }
 
     Ok(())
@@ -1536,6 +1894,14 @@ fn save_remote_url(sdal_root: &Path, name: &str, url: &str) -> Result<()> {
     let mut config = load_config(sdal_root)?;
     config.remotes.insert(name.to_string(), url.to_string());
     save_config(sdal_root, &config)
+}
+
+fn get_transport(url: &str) -> Box<dyn sdal_network::transport::Transport> {
+    if url.starts_with("sdalp://") {
+        Box::new(sdal_network::p2p::P2pTransport::new(url))
+    } else {
+        Box::new(sdal_network::transport::HttpTransport::new(url))
+    }
 }
 
 fn remove_remote(sdal_root: &Path, name: &str) -> Result<()> {
@@ -1763,9 +2129,50 @@ fn render_log_graph(sdal_root: &Path, storage: &FilesystemStorage) -> Result<()>
         }
     }
 
-    // Sort by timestamp descending (newest first)
-    let mut ordered: Vec<(String, sdal_core::Commit)> = commit_map.into_iter().collect();
-    ordered.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+    // Topological sort (Kahn's algorithm) prioritizing newer timestamps
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    for hash in commit_map.keys() {
+        in_degree.insert(hash.clone(), 0);
+    }
+    for commit in commit_map.values() {
+        for p in &commit.parents {
+            if !p.is_empty() && in_degree.contains_key(p) {
+                *in_degree.get_mut(p).unwrap() += 1;
+            }
+        }
+    }
+
+    let mut available: Vec<String> = in_degree
+        .iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(h, _)| h.clone())
+        .collect();
+
+    let mut ordered: Vec<(String, sdal_core::Commit)> = Vec::new();
+
+    while !available.is_empty() {
+        // Sort available by timestamp descending so we pick the newest ready commit
+        available.sort_by(|a, b| {
+            let t_a = commit_map[a].timestamp;
+            let t_b = commit_map[b].timestamp;
+            t_a.cmp(&t_b)
+        });
+        
+        let hash = available.pop().unwrap(); // pop takes from the end (highest timestamp)
+        let commit = commit_map.remove(&hash).unwrap();
+        
+        for p in &commit.parents {
+            if !p.is_empty() {
+                if let Some(deg) = in_degree.get_mut(p) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        available.push(p.clone());
+                    }
+                }
+            }
+        }
+        ordered.push((hash, commit));
+    }
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?

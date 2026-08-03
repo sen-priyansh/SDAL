@@ -48,23 +48,25 @@ SDAL Hub (proprietary server) is a separate application and is not tracked here.
   - Added `--filter` flag to `fetch`, `pull`, and `clone` CLI commands.
   - Client locally prunes `want_chunks` calculation based on the filter tree path.
   - Client automatically supports resumable chunk downloads thanks to phase 2 graph walking over local CAS storage state.
+- [x] **P2P Transport (`sdalp://`)**:
+  - Implemented `P2pTransport` allowing raw TCP socket synchronization.
+  - Added `sdal peer-serve` CLI command to start a direct peer sync server.
+  - Uses the same 2-phase protocol and `wire.rs` streaming, completely bypassing the HTTP Hub.
 
 ---
 
 ## 🔮 Remaining Tasks
 
-### 4. Partial Clone (`--filter`)
-- **Focus**: Allow cloning subsets of a repository.
-- **Task**: Client requests metadata for full tree but only fetches chunks under specified subtrees.
+- [x] **Native Pull Requests (`sdal pr`)**:
+  - Implemented `PullRequest` object type in CAS.
+  - Implemented `sdal pr create`, `list`, `merge` subcommands.
+  - Allowed fetching/syncing PRs via P2P graph walk (`p2p.rs` and `client.rs`).
 
-### 5. P2P Transport
-- **Focus**: Direct peer-to-peer transfers without any server.
-- **Task**: Implement a `P2pTransport` using the same 2-phase protocol over direct peer connections.
+---
 
-### 6. Native Pull Requests (`sdal pr`)
-- **Focus**: Local code review workflows.
-- **Task**: Implement CLI subcommands (`sdal pr create`, `list`, `merge`). Store PR metadata objects in CAS.
+## 🔮 Remaining Tasks
 
-### 7. Garbage Collection (`sdal gc`)
-- **Focus**: Disk space management.
-- **Task**: Traverse all branch heads, tag reachable objects/chunks, delete dangling objects in `.sdal/objects/`.
+- [x] **Garbage Collection (`sdal gc`)**:
+  - Implemented `sdal gc` command.
+  - Added full object traversal starting from branches, HEAD, PRs, and checkpoints.
+  - Implemented cleanup of unreferenced objects and chunks from `.sdal/objects/`.
