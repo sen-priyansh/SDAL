@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/*",
 ]
+exclude = [
+    "sdal_hub",
+]
 
 [workspace.dependencies]
 anyhow = "1.0"
